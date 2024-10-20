@@ -25,7 +25,7 @@ app.use((req, res, next) => {
 
 app.post("/api/webhooks/cloudflare", async (req, res) => {
   const data = req.body;
-  const queueName = `bunny_livestream_${process.env.RABBITMQ_PREFIX}`;
+  const queueName = `bunny_livestream_${process.env.RABBITMQ_PREFIX_CONNECT}`;
 
   try {
     await sendToQueue(queueName, data);
