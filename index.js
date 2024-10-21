@@ -25,7 +25,7 @@ app.use((req, res, next) => {
 
 app.post("/api/webhooks/cloudflare", async (req, res) => {
   const data = req.body;
-  const queueName = `bunny_livestream_${process.env.RABBITMQ_PREFIX_CONNECT}`;
+  const queueName = `bunny_livestream_${process.env.RABBITMQ_PREFIX}`;
 
   try {
     await sendToQueue(queueName, data);
@@ -36,10 +36,10 @@ app.post("/api/webhooks/cloudflare", async (req, res) => {
   }
 })
 
-// getMessage(`bunny_livestream_${process.env.RABBITMQ_PREFIX}`);
+getMessage(`bunny_livestream_${process.env.RABBITMQ_PREFIX}`);
 
 // Start server
-const port = process.env.DEVELOPMENT_PORT || 3101;
+const port = process.env.DEVELOPMENT_PORT || 3000;
 
 app.listen(port, (err) => {
   if (err) {
