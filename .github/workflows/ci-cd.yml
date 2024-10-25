@@ -52,4 +52,7 @@ jobs:
             docker pull t9780561/serverstream:${{ github.sha }}
             docker stop serverstream || true
             docker rm serverstream || true
-            docker run -d -p 3101:3101 --name serverstream --env-file /root/.env t9780561/serverstream:${{ github.sha }}
+            docker run -d -p 3101:3101 --name serverstream --env-file /root/.env -v /live-stream/:/app/live-stream t9780561/serverstream:${{ github.sha }}
+
+
+            #docker run -d -p 3101:3101 --name serverstream --env-file /root/.env t9780561/serverstream:7406594190128601b597e6253d81274d3343e767
