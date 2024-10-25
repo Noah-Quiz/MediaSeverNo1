@@ -10,6 +10,8 @@ COPY package*.json ./
 # Cài đặt các gói phụ thuộc
 RUN npm install
 
+RUN apt-get update && apt-get install -y ffmpeg
+
 # Sao chép toàn bộ mã nguồn vào container
 COPY . .
 
