@@ -3,12 +3,13 @@ const express = require("express");
 const cors = require("cors");
 const path = require("path");
 const { sendToQueue, getMessage } = require("./utils");
+const cloudflareRoutes = require("./routes/CloudflareRoute");
 const app = express();
 
 // Middleware
 app.use(
   cors({
-    origin: "*",
+    origin: ["http://localhost:4000"],
     methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
@@ -17,6 +18,7 @@ app.use(
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/live-stream', express.static(path.join(__dirname, 'live-stream')));
+
 // Log API requests
 app.use((req, res, next) => {
   console.log(req.method + " " + req.path);
@@ -36,8 +38,9 @@ app.post("/api/webhooks/cloudflare", async (req, res) => {
   }
 })
 
+app.use("/api/cloudflare", cloudflareRoutes);
+
 getMessage(`cloudflare.livestream`);
-getMessage(`bunny_livestream`);
 
 // Start server
 const port = process.env.DEVELOPMENT_PORT || 3101;

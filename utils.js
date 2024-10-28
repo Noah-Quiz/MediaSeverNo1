@@ -3,9 +3,9 @@ const fs = require('fs');
 const path = require('path');
 const https = require("https");
 const { spawn } = require('child_process');
+const ffmpeg = require('fluent-ffmpeg');
 const moment = require("moment");
 const { default: axios } = require("axios");
-const chokidar = require("chokidar");
 require("dotenv").config();
 
 // RabbitMQ connection URL
@@ -15,6 +15,10 @@ const developmentPort = process.env.DEVELOPMENT_PORT || "3101";
 const liveStreamDir = path.resolve('./live-stream');
 if (!fs.existsSync(liveStreamDir)) {
     fs.mkdirSync(liveStreamDir, { recursive: true });
+}
+const bunnyDir = path.resolve('./bunny');
+if (!fs.existsSync(bunnyDir)) {
+    fs.mkdirSync(bunnyDir, { recursive: true });
 }
 const pidDir = path.resolve(path.join(liveStreamDir, 'pid'));
 if (!fs.existsSync(pidDir)) {
@@ -73,43 +77,45 @@ const getMessage = async (queueName) => {
                             const streamServer = `srt://live.cloudflare.com:778?passphrase=${passphrase}&streamid=${streamId}`
                             switch (event) {
                                 case "live_input.connected":
-                                    console.log("Connected");
-                                    startFFmpeg(streamServer, id);
-                                    startFFmpegFull(streamServer, id);
+                                    await startFFmpeg(streamServer, id);
+
                                     break;
+
                                 case "live_input.disconnected":
-                                    console.log("Disconnected");
-                                    stopFFmpeg(id, false);
+                                    await stopFFmpeg(id, false);
+
+                                    // Upload to Bunny Storage
+                                    const bunnyOutputDir = path.join(bunnyDir, id);
+                                    const liveStreamOutputDir = path.join(liveStreamDir, id);
+                                    if (!fs.existsSync(bunnyOutputDir)) {
+                                        fs.mkdirSync(bunnyOutputDir, { recursive: true });
+                                    }
+
+                                    // Define m3u8 file name
+                                    const m3u8FileName = `${id}.m3u8`;
+
+                                    handleStreamFinish(bunnyOutputDir, m3u8FileName, id);
+                                    
+                                    // Generate thumbnail for livestream
+                                    await createThumbnail(bunnyOutputDir, liveStreamOutputDir);
+                                    const thumbnailFileName = await uploadThumbnail(bunnyOutputDir, id);
+                                    await sendToQueue("bunny_livestream_thumbnail", {
+                                        live_input_id: id,
+                                        thumbnailUrl: `https://${process.env.BUNNY_DOMAIN}/video/${id}/${thumbnailFileName}`,
+                                    })
+
+                                    await sendToQueue("live_stream.disconnected", {
+                                        live_input_id: id,
+                                        streamOnlineUrl: `https://${process.env.BUNNY_DOMAIN}/video/${id}/${m3u8FileName}`
+                                    });
+                                    
                                     break;
+
                                 case "live_input.errored":
                                     console.log("Cloudflare Error");
-                                    console.log("Error");
                                     break;
-                                default:
-                                    console.log("Default: ", event);
                             }
                             break;
-                        case `${process.env.RABBITMQ_PREFIX_BUNNYUPLOAD}`:
-                            console.log("Uploading to Bunny...")
-                            const identifier = id;
-                            const outputDir = path.join(liveStreamDir, identifier + '_full');
-                            if (!fs.existsSync(outputDir)) {
-                                fs.mkdirSync(outputDir, { recursive: true });
-                            }
-
-                            // Define m3u8 file name
-                            const m3u8FileName = `${identifier}_full.m3u8`;
-                            const m3u8FilePath = path.join(outputDir, m3u8FileName);
-
-                            handleStreamFinish(outputDir, m3u8FilePath, identifier);
-
-                            await sendToQueue("live_stream.disconnected", {
-                                live_input_id: identifier,
-                                streamOnlineUrl: `https://${process.env.BUNNY_DOMAIN}/video/${identifier}/${m3u8FileName}`
-                            });
-                            break;
-                        default:
-                            console.log("Default event");
                     }
 
                     channel.ack(msg);
@@ -132,12 +138,9 @@ const startFFmpeg = async (streamUrl, output) => {
             fs.mkdirSync(outputDir, { recursive: true });
         }
 
-        // Define m3u8 file name
         const outputFileName = `${output}.m3u8`;
         const outputPath = path.join(outputDir, outputFileName);
-
-        // Define ts file name
-        const segmentPath = path.join(outputDir, `${output}-segment-%03d.ts`);
+        const segmentPath = path.join(outputDir, `${output}-segment-%Y%m%d-%H%M%S.ts`);
 
         const ffmpeg = spawn('ffmpeg', [
             '-i', streamUrl,
@@ -147,10 +150,27 @@ const startFFmpeg = async (streamUrl, output) => {
             '-hls_time', '1',
             '-hls_list_size', '3',
             '-hls_flags', 'split_by_time',
+            '-strftime', '1',
             '-hls_segment_filename', segmentPath,
             '-tune', 'zerolatency',
             outputPath
-        ], { detached: true, stdio: 'ignore' });
+        ], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); // Pipe stdout and stderr
+
+        ffmpeg.on('error', (error) => {
+            console.error(`FFmpeg error: ${error.message}`);
+        });
+
+        ffmpeg.on('exit', async (code) => {
+            console.log(`FFmpeg exited with code ${code}`);
+            if (code !== 0) {
+                console.error(`FFmpeg process failed with code ${code}`);
+            }
+            try {
+                await stopFFmpeg(output, true);
+            } catch (err) {
+                console.error(`Error stopping FFmpeg: ${err}`);
+            }
+        });
 
         ffmpeg.unref();
 
@@ -166,163 +186,89 @@ const startFFmpeg = async (streamUrl, output) => {
         // Send to queue live event
         await sendToQueue("live_stream.connected", {
             live_input_id: output,
-            streamServerUrl: `live-stream/${path.relative(liveStreamDir, outputPath)}`,
+            streamServerUrl: `${process.env.BASE_URL}/live-stream/${path.relative(liveStreamDir, outputPath).replace(/\\/g, "/")}`,
         });
-
-        ffmpeg.on('exit', async (code) => {
-            try {
-                console.log("Exiting FFmpeg...")
-                await stopFFmpeg(output, true);
-
-                console.log(`FFmpeg process with PID ${ffmpeg.pid} exited with code ${code} and PID file deleted`);
-            } catch (err) {
-                console.error(`Error:`, err);
-            }
-        });
-
-        ffmpeg.on('error', (error) => {
-            console.log(error)
-        })
     } catch (error) {
-        console.log(error)
+        console.error("Error starting FFmpeg:", error);
     }
 };
 
-const startFFmpegFull = async (streamUrl, output) => {
+const createM3U8WithFFmpeg = async (liveStreamOutputDir, bunnyOutputDir, m3u8FileName, second = 300) => {
     try {
-        const outputDir = path.join(liveStreamDir, output + '_full');
-        if (!fs.existsSync(outputDir)) {
-            fs.mkdirSync(outputDir, { recursive: true });
+        if (!fs.existsSync(bunnyOutputDir)) {
+            fs.mkdirSync(bunnyOutputDir, { recursive: true });
         }
 
-        // Define m3u8 file name for the full segment list
-        const outputFileName = `${output}_full.m3u8`;
-        const outputPath = path.join(outputDir, outputFileName);
+        const m3u8FilePath = path.join(bunnyOutputDir, m3u8FileName.endsWith('.m3u8') ? m3u8FileName : `${m3u8FileName}.m3u8`);
 
-        // Define ts file name (same as in the original process)
-        const segmentPath = path.join(outputDir, `${output}-segment-%03d.ts`);
+        // Get all .ts files from the directory
+        const tsFiles = fs.readdirSync(liveStreamOutputDir)
+            .filter(file => file.endsWith('.ts'))
+            .map(file => path.join(liveStreamOutputDir, file))
+            .sort();
 
-        const ffmpegAll = spawn('ffmpeg', [
-            '-i', streamUrl,
-            '-c:v', 'copy',
-            '-c:a', 'copy',
-            '-f', 'hls',
-            '-hls_time', '10',
-            '-hls_list_size', '0',
-            '-hls_flags', 'append_list',
-            '-hls_segment_filename', segmentPath,
-            '-tune', 'zerolatency',
-            outputPath
-        ], { detached: true, stdio: 'ignore' });
+        const totalFiles = tsFiles.length;
 
-        ffmpegAll.unref();
+        // Determine which TS files to include based on the second parameter
+        const middle = Math.floor(totalFiles / 2);
+        const start = Math.max(0, middle - Math.floor(second / 2));
+        const end = Math.min(totalFiles, start + second);
 
-        ffmpegAll.on('exit', async (code) => {
-            try {
-                console.log(`FFmpeg process (all segments) with PID ${ffmpegAll.pid} exited with code ${code} and PID file deleted`);
-            } catch (err) {
-                console.error(`Error:`, err);
-            }
-        });
+        // Select the appropriate TS files
+        const selectedFiles = tsFiles.slice(start, end);
 
-        ffmpegAll.on('error', (error) => {
-            console.log(error);
-        });
-
-        // Generate thumbnail for livestream
-        setTimeout(async () => {
-            const file = await findTsFileClosestToTenPercent(outputDir);
-            if (file) {
-                await createThumbnail(path.join(outputDir, file.file), outputDir);
-            }
-            const thumbnailFileName = await uploadThumbnail(outputDir, output);
-            await sendToQueue("bunny_livestream_thumbnail", {
-                live_input_id: output,
-                thumbnailUrl: `https://${process.env.BUNNY_DOMAIN}/video/${output}/${thumbnailFileName}`,
-            })
-        }, 30000);
-
-    } catch (error) {
-        console.log(error);
-    }
-};
-
-// Function to delete extra ts files
-const deleteExtraTSFiles = async (tsFiles, outputDir) => {
-    try {
-        const allFiles = fs.readdirSync(outputDir);
-        allFiles.forEach(file => {
-            if (file.endsWith('.ts') && !tsFiles.includes(file)) {
-                fs.unlinkSync(path.join(outputDir, file));
-                console.log(`Deleted extra file: ${file}`);
-            }
-        });
-    } catch (error) {
-        throw error;
-    }
-};
-
-const removeTsEntries = async (m3u8File, tsFiles) => {
-    try {
-        const filePath = path.resolve(m3u8File);
-        let lines = fs.readFileSync(filePath, 'utf-8').split('\n');
-
-        let newLines = [];
-
-        for (let i = 0; i < lines.length; i++) {
-            let line = lines[i].trim();
-
-            if (line.endsWith('.ts') && !tsFiles.includes(line)) {
-                continue;
-            }
-
-            if (i < lines.length - 1 && lines[i + 1].trim().endsWith('.ts') && !tsFiles.includes(lines[i + 1].trim())) {
-                continue;  // Skip the #EXTINF line
-            }
-
-            // Otherwise, add the line to newLines
-            newLines.push(lines[i]);
+        if (selectedFiles.length === 0) {
+            console.error('No TS files selected for M3U8 creation.');
+            return;
         }
 
-        // Write the updated content back to the M3U8 file
-        fs.writeFileSync(filePath, newLines.join('\n'), 'utf-8');
+        // Write the M3U8 playlist manually
+        const m3u8Content = [
+            '#EXTM3U',
+            '#EXT-X-VERSION:3',
+            '#EXT-X-TARGETDURATION:1',
+            '#EXT-X-MEDIA-SEQUENCE:0',
+        ];
+
+        // Add each TS file to the playlist
+        selectedFiles.forEach(tsFile => {
+            const tsFileName = path.basename(tsFile);
+            m3u8Content.push(`#EXTINF:1.0,`);
+            m3u8Content.push(tsFileName.replace(/\\/g, '/')); 
+        });
+
+        // Add the end of the playlist
+        m3u8Content.push('#EXT-X-ENDLIST');
+
+        // Write the content to the M3U8 file
+        fs.writeFileSync(m3u8FilePath, m3u8Content.join('\n'));
+
+        console.log(`M3U8 file created successfully at ${m3u8FilePath}`);
+
     } catch (error) {
-        throw error;
+        console.error('Error during M3U8 creation process:', error);
     }
-}
+};
+
 
 // Main function to handle the stream finishing
-const handleStreamFinish = async (outputDir, m3u8FilePath, identifier) => {
+const handleStreamFinish = async (bunnyOutputDir, m3u8FileName, identifier) => {
     try {
-        const tsFiles = fs.readdirSync(outputDir).filter(file => file.endsWith('.ts'));
-        const totalTSFiles = tsFiles.length;
+        const liveStreamOutputDir = path.join(liveStreamDir, identifier);
+        const tsDir = path.join(liveStreamDir, identifier);
 
-        console.log(`Total .ts files: ${totalTSFiles}`);
-
-        const m3u8FileName = `${identifier}_full.m3u8`;
-        const filePath = path.join(outputDir, m3u8FileName);
-
-        if (totalTSFiles > 30) {
-            // Scenario 2: Select the middle 30 .ts files
-            const middleIndex = Math.floor(totalTSFiles / 2);
-            const start = Math.max(middleIndex - 15, 0);
-            const selectedTSFiles = tsFiles.slice(start, start + 30);
-
-            // Delete extra .ts files
-            await deleteExtraTSFiles(selectedTSFiles, outputDir);
-
-            // Delete ts file references in m3u8 file
-            await removeTsEntries(m3u8FilePath, selectedTSFiles);
-        }
+        await createM3U8WithFFmpeg(liveStreamOutputDir, bunnyOutputDir, identifier, 300);
 
         // Upload files
-        await replaceTsFilePath(filePath, identifier);
-        await uploadTsFiles(outputDir, identifier);
-        await uploadToBunnyCDN(filePath, identifier, path.basename(filePath));
+        await replaceTsFilePath(path.join(bunnyOutputDir, m3u8FileName), identifier);
+        await uploadTsFiles(tsDir, identifier, 300);
+        await uploadToBunnyCDN(path.join(bunnyOutputDir, m3u8FileName), identifier, m3u8FileName);
     } catch (error) {
         console.error("Error: ", error);
     }
 };
+
+// handleStreamFinish(path.join(bunnyDir, "a4f7db73deb6ae77da1d61d5038a9486"), "a4f7db73deb6ae77da1d61d5038a9486.m3u8", "a4f7db73deb6ae77da1d61d5038a9486");
 
 // Stop FFmpeg process
 const stopFFmpeg = async (identifier, hasEndTag) => {
@@ -350,58 +296,75 @@ const stopFFmpeg = async (identifier, hasEndTag) => {
     }
 };
 
-const createThumbnail = async (tsFilePath, outputDir) => {
+const createThumbnail = async (bunnyOutputDir, liveStreamOutputDir) => {
     try {
-        console.log(`Creating thumbnail for: ${tsFilePath}`);
+        // Get all .ts files, sorted
+        const tsFiles = fs.readdirSync(liveStreamOutputDir)
+            .filter(file => file.endsWith('.ts'))
+            .map(file => path.join(liveStreamOutputDir, file))
+            .sort();
 
-        // Check if the ts file exists before generating the thumbnail
-        if (!fs.existsSync(tsFilePath)) {
-            throw new Error(`TS file not found: ${tsFilePath}`);
+        if (tsFiles.length === 0) {
+            throw new Error("No TS files found for thumbnail generation.");
         }
 
-        // Ensure output directory exists
-        if (!fs.existsSync(outputDir)) {
-            fs.mkdirSync(outputDir, { recursive: true });
+        // Ensure the output directory exists
+        if (!fs.existsSync(bunnyOutputDir)) {
+            fs.mkdirSync(bunnyOutputDir, { recursive: true });
         }
 
-        const outputFileName = `${path.basename(tsFilePath, ".ts")}-thumbnail.png`;
-        const outputPath = path.join(outputDir, outputFileName);
+        // Define the output thumbnail path
+        const outputFileName = `thumbnail.png`;
+        const outputPath = path.join(bunnyOutputDir, outputFileName);
 
-        // Generate a thumbnail using ffmpeg from 5 seconds
-        await new Promise((resolve, reject) => {
-            const ffmpeg = spawn("ffmpeg", [
-                "-i",
-                tsFilePath,
-                "-vf",
-                "thumbnail",
-                "-frames:v",
-                "1", // Get only one frame
-                outputPath,
-            ]);
+        // Check if the thumbnail already exists
+        if (fs.existsSync(outputPath)) {
+            console.log(`Thumbnail already exists at: ${outputPath}`);
+            return outputPath; // Return immediately if the thumbnail exists
+        }
 
-            ffmpeg.on("close", (code) => {
-                if (code === 0) {
-                    resolve();
-                } else {
-                    reject(
-                        new Error(
-                            `Failed to create thumbnail, ffmpeg exited with code ${code}`
-                        )
-                    );
-                }
-            });
+        for (const tsFilePath of tsFiles) {
+            // Check if the selected TS file exists
+            if (!fs.existsSync(tsFilePath)) {
+                console.warn(`TS file not found: ${tsFilePath}, skipping.`);
+                continue; // Skip this file if it doesn't exist
+            }
 
-            ffmpeg.on("error", (error) => {
-                reject(
-                    new Error(
-                        `Failed to create thumbnail, ffmpeg error: ${error.message}`
-                    )
-                );
-            });
-        });
+            console.log(`Creating thumbnail for: ${tsFilePath}`);
 
-        console.log(`Thumbnail created at: ${outputPath}`);
-        return outputPath;
+            try {
+                // Generate a thumbnail from the current TS file using ffmpeg
+                await new Promise((resolve, reject) => {
+                    const ffmpeg = spawn("ffmpeg", [
+                        "-i", tsFilePath, // No quotes needed
+                        "-vf", "select='eq(pict_type\\,I)'",
+                        "-frames:v", "1",
+                        outputPath // No quotes needed
+                    ], { shell: false });
+
+                    ffmpeg.on("close", (code) => {
+                        if (code === 0) {
+                            console.log(`Thumbnail created at: ${outputPath}`);
+                            resolve(); // Resolve promise on success
+                        } else {
+                            reject(new Error(`Failed to create thumbnail from ${tsFilePath}, ffmpeg exited with code ${code}`));
+                        }
+                    });
+
+                    ffmpeg.on("error", (error) => {
+                        reject(new Error(`Failed to create thumbnail from ${tsFilePath}, ffmpeg error: ${error.message}`));
+                    });
+                });
+
+                return outputPath; // Return the path of the successfully created thumbnail
+
+            } catch (error) {
+                console.error(error.message); // Log the error for this TS file
+            }
+        }
+
+        throw new Error("Failed to create a thumbnail from all TS files."); // If no thumbnails were created
+
     } catch (error) {
         console.error("Error creating thumbnail:", error);
         throw error;
@@ -435,75 +398,41 @@ const getTsFileDuration = (tsFilePath) => {
     });
 };
 
-const findTsFileClosestToTenPercent = async (directory) => {
-    try {
-        const files = fs.readdirSync(directory);
-        let totalDuration = 0;
-        const durations = [];
 
-        // Filter .ts files and get their durations
-        for (const file of files) {
-            if (path.extname(file) === ".ts") {
-                const filePath = path.join(directory, file);
-                const duration = await getTsFileDuration(filePath);
-                durations.push({ file, duration });
-                totalDuration += duration;
-            }
-        }
-
-        // Calculate 10% of the total duration
-        const tenPercentDuration = totalDuration * 0.1;
-
-        // Find the first file that causes the cumulative duration to exceed or get close to 10%
-        let cumulativeDuration = 0;
-        let selectedFile = null;
-
-        for (const { file, duration } of durations) {
-            cumulativeDuration += duration;
-
-            // If cumulative duration exceeds 10% or is closest to it, return that file
-            if (cumulativeDuration >= tenPercentDuration) {
-                selectedFile = { file, duration };
-                break;
-            }
-        }
-
-        return selectedFile;
-    } catch (error) {
-        console.error("Error finding file closest to 10%:", error);
-        throw error;
-    }
-};
 
 const uploadToBunnyCDN = async (filePath, identifier, fileName) => {
-    const readStream = fs.createReadStream(filePath);
-    const storageZone = process.env.BUNNY_STORAGE_ZONE_NAME;
-    const path = `/${storageZone}/video/${identifier}/${fileName}`;
+    try {
+        const readStream = fs.createReadStream(filePath);
+        const storageZone = process.env.BUNNY_STORAGE_ZONE_NAME;
+        const path = `/${storageZone}/video/${identifier}/${fileName}`;
 
-    const options = {
-        method: "PUT",
-        host: "storage.bunnycdn.com",
-        path: path,
-        headers: {
-            AccessKey: process.env.BUNNY_STORAGE_PASSWORD,
-            "Content-Type": "application/octet-stream",
-            "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate", // Disable caching
-            Expires: "0",
-            Pragma: "no-cache",
-        },
-    };
+        const options = {
+            method: "PUT",
+            host: "storage.bunnycdn.com",
+            path: path,
+            headers: {
+                AccessKey: process.env.BUNNY_STORAGE_PASSWORD,
+                "Content-Type": "application/octet-stream",
+                "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate", // Disable caching
+                Expires: "0",
+                Pragma: "no-cache",
+            },
+        };
 
-    const req = https.request(options, (res) => {
-        res.on("data", (chunk) => {
-            console.log(chunk.toString("utf8"));
+        const req = https.request(options, (res) => {
+            res.on("data", (chunk) => {
+                console.log(chunk.toString("utf8"));
+            });
         });
-    });
 
-    req.on("error", (error) => {
-        console.error(error);
-    });
+        req.on("error", (error) => {
+            console.error(error);
+        });
 
-    readStream.pipe(req);
+        readStream.pipe(req);   
+    } catch (error) {
+        console.error("Error uploading to Bunny: ", error);
+    }
 };
 
 // Function to delete folder or file from BunnyCDN
@@ -581,11 +510,11 @@ const purgeBunnyCDNCache = async () => {
 
 // Function to replace .ts file paths in .m3u8 with BunnyCDN URLs
 const replaceTsFilePath = async (m3u8FilePath, identifier) => {
-    const cdnUrl = `https://${process.env.BUNNY_DOMAIN}/video/${identifier}/`;
+    const cdnUrl = `https://${process.env.BUNNY_DOMAIN}/video/${identifier}`;
     let m3u8Content = fs.readFileSync(m3u8FilePath, "utf8");
 
     const regex = new RegExp(
-        `${identifier}-segment-\\d+\\.ts`,
+        `${identifier}-segment-\\d{8}-\\d{6}\\.ts`,
         "g"
     );
 
@@ -597,16 +526,39 @@ const replaceTsFilePath = async (m3u8FilePath, identifier) => {
 };
 
 // Function to upload .ts segment files
-const uploadTsFiles = async (outputDir, identifier) => {
-    const files = fs.readdirSync(outputDir);
-    for (const file of files) {
-        if (file.endsWith(".ts") && file.includes(identifier)) {
-            const fileName = path.basename(file);
-            const filePath = path.join(outputDir, fileName);
-            await uploadToBunnyCDN(filePath, identifier, fileName);
+const uploadTsFiles = async (outputDir, identifier, second = 300) => {
+    try {
+        const tsFiles = fs.readdirSync(outputDir)
+            .filter(file => file.endsWith('.ts') && file.includes(identifier))
+            .sort();
+
+        const totalFiles = tsFiles.length;
+
+        // Determine starting point for middle selection
+        const middle = Math.floor(totalFiles / 2);
+        const start = Math.max(0, middle - Math.floor(second / 2));
+        const end = Math.min(totalFiles, start + second);
+
+        // Select the middle portion of TS files based on `second`
+        const selectedFiles = tsFiles.slice(start, end);
+
+        if (selectedFiles.length === 0) {
+            console.error('No TS files selected for upload.');
+            return;
         }
+
+        for (const file of selectedFiles) {
+            const filePath = path.join(outputDir, file);
+            await uploadToBunnyCDN(filePath, identifier, file);
+            console.log(`Uploaded ${file} successfully`);
+        }
+        
+        console.log(`Uploaded ts files successfully`);
+    } catch (error) {
+        console.error("Error uploading ts files:", error);
     }
-}
+};
+
 
 const uploadThumbnail = async (outputDir, identifier) => {
     const files = fs.readdirSync(outputDir);
@@ -622,7 +574,7 @@ const uploadThumbnail = async (outputDir, identifier) => {
     }
 
     return fileName;
-}
+};
 
 
 const retrieveCloudFlareStreamLiveInput = async (uid) => {
