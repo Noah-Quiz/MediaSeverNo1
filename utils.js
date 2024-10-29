@@ -145,23 +145,7 @@ const startFFmpeg = async (streamUrl, output) => {
             '-hls_segment_filename', segmentPath,
             '-tune', 'zerolatency',
             outputPath
-        ], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); // Pipe stdout and stderr
-
-        ffmpeg.on('error', (error) => {
-            console.error(`FFmpeg error: ${error.message}`);
-        });
-
-        ffmpeg.on('exit', async (code) => {
-            console.log(`FFmpeg exited with code ${code}`);
-            if (code !== 0) {
-                console.error(`FFmpeg process failed with code ${code}`);
-            }
-            try {
-                await stopFFmpeg(output, true);
-            } catch (err) {
-                console.error(`Error stopping FFmpeg: ${err}`);
-            }
-        });
+        ], { detached: true, stdio: 'ignore' });
 
         ffmpeg.unref();
 
@@ -177,7 +161,7 @@ const startFFmpeg = async (streamUrl, output) => {
         // Send to queue live event
         await sendToQueue("live_stream.connected", {
             live_input_id: output,
-            streamServerUrl: `${process.env.BUNNY_DOMAIN_ORIGIN}/live-stream/${path.relative(liveStreamDir, outputPath).replace(/\\/g, "/")}`,
+            streamServerUrl: `https://${process.env.BUNNY_DOMAIN_ORIGIN}/live-stream/${path.relative(liveStreamDir, outputPath).replace(/\\/g, "/")}`,
         });
 
         // Generate thumbnail for livestream
