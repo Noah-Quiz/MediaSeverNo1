@@ -101,12 +101,12 @@ const getMessage = async (queueName) => {
                                     const thumbnailFileName = await uploadThumbnail(bunnyOutputDir, id);
                                     await sendToQueue("bunny_livestream_thumbnail", {
                                         live_input_id: id,
-                                        thumbnailUrl: `https://${process.env.BUNNY_DOMAIN}/video/${id}/${thumbnailFileName}`,
+                                        thumbnailUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${id}/${thumbnailFileName}`,
                                     })
 
                                     await sendToQueue("live_stream.disconnected", {
                                         live_input_id: id,
-                                        streamOnlineUrl: `https://${process.env.BUNNY_DOMAIN}/video/${id}/${m3u8FileName}`
+                                        streamOnlineUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${id}/${m3u8FileName}`
                                     });
                                     
                                     break;
@@ -186,7 +186,7 @@ const startFFmpeg = async (streamUrl, output) => {
         // Send to queue live event
         await sendToQueue("live_stream.connected", {
             live_input_id: output,
-            streamServerUrl: `${process.env.BASE_URL}/live-stream/${path.relative(liveStreamDir, outputPath).replace(/\\/g, "/")}`,
+            streamServerUrl: `${process.env.BUNNY_DOMAIN_ORIGIN}/live-stream/${path.relative(liveStreamDir, outputPath).replace(/\\/g, "/")}`,
         });
     } catch (error) {
         console.error("Error starting FFmpeg:", error);
