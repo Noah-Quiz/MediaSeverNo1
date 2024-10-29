@@ -86,7 +86,6 @@ const getMessage = async (queueName) => {
 
                                     // Upload to Bunny Storage
                                     const bunnyOutputDir = path.join(bunnyDir, id);
-                                    const liveStreamOutputDir = path.join(liveStreamDir, id);
                                     if (!fs.existsSync(bunnyOutputDir)) {
                                         fs.mkdirSync(bunnyOutputDir, { recursive: true });
                                     }
@@ -95,14 +94,6 @@ const getMessage = async (queueName) => {
                                     const m3u8FileName = `${id}.m3u8`;
 
                                     handleStreamFinish(bunnyOutputDir, m3u8FileName, id);
-                                    
-                                    // Generate thumbnail for livestream
-                                    await createThumbnail(bunnyOutputDir, liveStreamOutputDir);
-                                    const thumbnailFileName = await uploadThumbnail(bunnyOutputDir, id);
-                                    await sendToQueue("bunny_livestream_thumbnail", {
-                                        live_input_id: id,
-                                        thumbnailUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${id}/${thumbnailFileName}`,
-                                    })
 
                                     await sendToQueue("live_stream.disconnected", {
                                         live_input_id: id,
@@ -188,6 +179,33 @@ const startFFmpeg = async (streamUrl, output) => {
             live_input_id: output,
             streamServerUrl: `${process.env.BUNNY_DOMAIN_ORIGIN}/live-stream/${path.relative(liveStreamDir, outputPath).replace(/\\/g, "/")}`,
         });
+
+        // Generate thumbnail for livestream
+        const uploadThumbnailToBunny = async () => {
+            return new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    reject(new Error('Thumbnail upload timed out'));
+                }, 15000); // 15 seconds timeout
+
+                uploadThumbnail(bunnyOutputDir, output)
+                    .then(async (thumbnailFileName) => {
+                        clearTimeout(timeout);
+                        
+                        // Send to queue after successful upload
+                        await sendToQueue("bunny_livestream_thumbnail", {
+                            live_input_id: output,
+                            thumbnailUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${output}/${thumbnailFileName}`,
+                        });
+
+                        resolve(thumbnailFileName);
+                    })
+                    .catch((error) => {
+                        clearTimeout(timeout);
+                        reject(error);
+                    });
+            });
+        };
+        await uploadThumbnailToBunny();
     } catch (error) {
         console.error("Error starting FFmpeg:", error);
     }
