@@ -250,6 +250,7 @@ const handleStreamFinish = async (bunnyOutputDir, m3u8FileName, identifier) => {
         await createM3U8WithFFmpeg(liveStreamOutputDir, bunnyOutputDir, identifier, 300);
 
         // Upload files
+        await deleteFromBunnyCDN(identifier);
         await replaceTsFilePath(path.join(bunnyOutputDir, m3u8FileName), identifier);
         await uploadTsFiles(tsDir, identifier, 300);
         await uploadToBunnyCDN(path.join(bunnyOutputDir, m3u8FileName), identifier, m3u8FileName);
