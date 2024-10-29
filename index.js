@@ -9,7 +9,7 @@ const app = express();
 // Middleware
 app.use(
   cors({
-    origin: ["http://localhost:4000"],
+    origin: ["*"],
     methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
