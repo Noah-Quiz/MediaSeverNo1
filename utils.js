@@ -181,31 +181,19 @@ const startFFmpeg = async (streamUrl, output) => {
         });
 
         // Generate thumbnail for livestream
-        const uploadThumbnailToBunny = async () => {
-            return new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => {
-                    reject(new Error('Thumbnail upload timed out'));
-                }, 15000); // 15 seconds timeout
-
-                uploadThumbnail(bunnyOutputDir, output)
-                    .then(async (thumbnailFileName) => {
-                        clearTimeout(timeout);
-                        
-                        // Send to queue after successful upload
-                        await sendToQueue("bunny_livestream_thumbnail", {
-                            live_input_id: output,
-                            thumbnailUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${output}/${thumbnailFileName}`,
-                        });
-
-                        resolve(thumbnailFileName);
-                    })
-                    .catch((error) => {
-                        clearTimeout(timeout);
-                        reject(error);
-                    });
+        setTimeout(async () => {
+            const bunnyOutputDir = path.join(bunnyDir, output);
+            const liveStreamOutputDir = path.join(liveStreamDir, output);
+            
+            await createThumbnail(bunnyOutputDir, liveStreamOutputDir);
+            
+            const thumbnailFileName = await uploadThumbnail(bunnyOutputDir, output);
+            
+            await sendToQueue("bunny_livestream_thumbnail", {
+                live_input_output: output,
+                thumbnailUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${output}/${thumbnailFileName}`,
             });
-        };
-        await uploadThumbnailToBunny();
+        }, 15000);
     } catch (error) {
         console.error("Error starting FFmpeg:", error);
     }
@@ -568,7 +556,6 @@ const uploadTsFiles = async (outputDir, identifier, second = 300) => {
         for (const file of selectedFiles) {
             const filePath = path.join(outputDir, file);
             await uploadToBunnyCDN(filePath, identifier, file);
-            console.log(`Uploaded ${file} successfully`);
         }
         
         console.log(`Uploaded ts files successfully`);
