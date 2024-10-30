@@ -131,17 +131,16 @@ const startFFmpeg = async (streamUrl, output) => {
 
         const outputFileName = `${output}.m3u8`;
         const outputPath = path.join(outputDir, outputFileName);
-        const segmentPath = path.join(outputDir, `${output}-segment-%Y%m%d-%06d.ts`);
+        const segmentPath = path.join(outputDir, `${output}-segment-%06d.ts`);
 
         const ffmpeg = spawn('ffmpeg', [
             '-i', streamUrl,
             '-c:v', 'copy',
             '-c:a', 'copy',
             '-f', 'hls',
-            '-hls_time', '1',
-            '-hls_list_size', '3',
+            '-hls_time', '2',
+            '-hls_list_size', '2',
             '-hls_flags', 'split_by_time',
-            '-strftime', '1',
             '-hls_segment_filename', segmentPath,
             '-tune', 'zerolatency',
             outputPath
