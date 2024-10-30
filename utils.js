@@ -134,27 +134,19 @@ const startFFmpeg = async (streamUrl, output) => {
         const segmentPath = path.join(outputDir, `${output}-segment-%Y%m%d-%H%M%S.ts`);
 
         const ffmpeg = spawn('ffmpeg', [
-            '-fflags', 'nobuffer',
             '-i', streamUrl,
             '-c:v', 'copy',
             '-c:a', 'copy',
-            '-g', '30',                       
-            '-keyint_min', '30',             
-            '-sc_threshold', '0',             
-            '-force_key_frames', 'expr:gte(t,n_forced*2)', 
-            '-preset', 'ultrafast',        
             '-f', 'hls',
-            '-hls_time', '2',                
-            '-hls_list_size', '3', 
-            '-hls_flags', 'independent_segments', 
-            '-hls_allow_cache', '0',
-            '-strftime', '1',
-            '-hls_segment_type', 'mpegts',
+            '-hls_time', '1',
+            '-hls_list_size', '2',
+            '-hls_flags', 'split_by_time',
             '-hls_segment_filename', segmentPath,
-            '-tune', 'zerolatency',           
-            '-max_interleave_delta', '0',     
+            '-tune', 'zerolatency',
             outputPath
         ], { detached: true, stdio: 'ignore' });
+
+        ffmpeg.unref();
 
         ffmpeg.on('error', (err) => {
             console.error('Failed to start subprocess:', err);
