@@ -239,14 +239,14 @@ const createM3U8WithFFmpeg = async (liveStreamOutputDir, bunnyOutputDir, m3u8Fil
         const m3u8Content = [
             '#EXTM3U',
             '#EXT-X-VERSION:3',
-            '#EXT-X-TARGETDURATION:1',
+            '#EXT-X-TARGETDURATION:2',
             '#EXT-X-MEDIA-SEQUENCE:0',
         ];
 
         // Add each TS file to the playlist
         selectedFiles.forEach(tsFile => {
             const tsFileName = path.basename(tsFile);
-            m3u8Content.push(`#EXTINF:1.0,`);
+            m3u8Content.push(`#EXTINF:2.0,`);
             m3u8Content.push(tsFileName.replace(/\\/g, '/')); 
         });
 

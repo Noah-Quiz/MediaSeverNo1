@@ -4,6 +4,7 @@ const cors = require("cors");
 const path = require("path");
 const { sendToQueue, getMessage } = require("./utils");
 const cloudflareRoutes = require("./routes/CloudflareRoute");
+const streamRoutes = require("./routes/StreamRoute");
 const app = express();
 
 // Middleware
@@ -45,6 +46,7 @@ app.post("/api/webhooks/cloudflare", async (req, res) => {
 })
 
 app.use("/api/cloudflare", cloudflareRoutes);
+app.use("/api/streams", streamRoutes);
 
 try {
   getMessage(`cloudflare.livestream`);
