@@ -138,7 +138,7 @@ const startFFmpeg = async (streamUrl, output) => {
             '-c:v', 'copy',
             '-c:a', 'copy',
             '-f', 'hls',
-            '-hls_time', '1',
+            '-hls_time', '2',
             '-hls_list_size', '3',
             '-hls_flags', 'split_by_time',
             '-strftime', '1',
