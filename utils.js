@@ -71,10 +71,10 @@ const getMessage = async (queueName) => {
 
                             // Retrieve stream key using input id
                             const stream = await retrieveCloudFlareStreamLiveInput(id);
-                            const streamId = stream?.srtPlayback?.streamId;
-                            const passphrase = stream?.srtPlayback?.passphrase;
-
-                            const streamServer = `srt://live.cloudflare.com:778?passphrase=${passphrase}&streamid=${streamId}`
+                            const rtmpsUrl = stream?.rtmpsPlayback?.url;
+                            const streamKey = stream?.rtmpsPlayback?.streamKey;
+                            
+                            const streamServer = `${rtmpsUrl}${streamKey}`;
                             switch (event) {
                                 case "live_input.connected":
                                     await startFFmpeg(streamServer, id);
@@ -134,19 +134,41 @@ const startFFmpeg = async (streamUrl, output) => {
         const segmentPath = path.join(outputDir, `${output}-segment-%Y%m%d-%H%M%S.ts`);
 
         const ffmpeg = spawn('ffmpeg', [
+            '-fflags', 'nobuffer',
             '-i', streamUrl,
             '-c:v', 'copy',
             '-c:a', 'copy',
+            '-g', '30',                       
+            '-keyint_min', '30',             
+            '-sc_threshold', '0',             
+            '-force_key_frames', 'expr:gte(t,n_forced*2)', 
+            '-preset', 'ultrafast',        
             '-f', 'hls',
-            '-hls_time', '2',
-            '-hls_list_size', '5',
-            '-hls_flags', 'split_by_time',
+            '-hls_time', '2',                
+            '-hls_list_size', '3', 
+            '-hls_flags', 'independent_segments', 
+            '-hls_allow_cache', '0',
             '-strftime', '1',
+            '-hls_segment_type', 'mpegts',
             '-hls_segment_filename', segmentPath,
-            '-tune', 'zerolatency',
+            '-tune', 'zerolatency',           
+            '-max_interleave_delta', '0',     
             outputPath
         ], { detached: true, stdio: 'ignore' });
 
+        ffmpeg.on('error', (err) => {
+            console.error('Failed to start subprocess:', err);
+        });
+        
+        ffmpeg.on('exit', (code, signal) => {
+            if (code) {
+                console.error(`FFmpeg exited with code ${code}`);
+            }
+            if (signal) {
+                console.error(`FFmpeg was killed with signal ${signal}`);
+            }
+        });
+        
         ffmpeg.unref();
 
         // Store the PID of the process
@@ -166,17 +188,26 @@ const startFFmpeg = async (streamUrl, output) => {
 
         // Generate thumbnail for livestream
         setTimeout(async () => {
-            const bunnyOutputDir = path.join(bunnyDir, output);
-            const liveStreamOutputDir = path.join(liveStreamDir, output);
-            
-            await createThumbnail(bunnyOutputDir, liveStreamOutputDir);
-            
-            const thumbnailFileName = await uploadThumbnail(bunnyOutputDir, output);
-            
-            await sendToQueue("bunny_livestream_thumbnail", {
-                live_input_output: output,
-                thumbnailUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${output}/${thumbnailFileName}`,
-            });
+            try {
+                const bunnyOutputDir = path.join(bunnyDir, output);
+                const liveStreamOutputDir = path.join(liveStreamDir, output);
+                
+                try {
+                    await createThumbnail(bunnyOutputDir, liveStreamOutputDir);
+                } catch (error) {
+                    return;
+                }
+                
+                const thumbnailFileName = await uploadThumbnail(bunnyOutputDir, output);
+                
+                await sendToQueue("bunny_livestream_thumbnail", {
+                    live_input_output: output,
+                    thumbnailUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${output}/${thumbnailFileName}`,
+                });
+            } catch (error) {
+                console.error("Error uploading thumbnail");
+                return
+            }
         }, 15000);
     } catch (error) {
         console.error("Error starting FFmpeg:", error);

@@ -46,7 +46,12 @@ app.post("/api/webhooks/cloudflare", async (req, res) => {
 
 app.use("/api/cloudflare", cloudflareRoutes);
 
-getMessage(`cloudflare.livestream`);
+try {
+  getMessage(`cloudflare.livestream`);
+} catch (error) {
+  console.error("Error consuming queue: ", error);
+}
+
 
 // Start server
 const port = process.env.DEVELOPMENT_PORT || 3101;
