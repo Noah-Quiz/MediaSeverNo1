@@ -17,7 +17,13 @@ app.use(
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use('/live-stream', express.static(path.join(__dirname, 'live-stream')));
+app.use('/live-stream', express.static(path.join(__dirname, 'live-stream'), {
+  setHeaders: (res) => {
+      res.set('Cache-Control', 'no-cache');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
+  }
+}));
 
 // Log API requests
 app.use((req, res, next) => {
