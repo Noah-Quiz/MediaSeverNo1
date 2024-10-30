@@ -141,6 +141,7 @@ const startFFmpeg = async (streamUrl, output) => {
             '-hls_time', '1',
             '-hls_list_size', '2',
             '-hls_flags', 'split_by_time',
+            '-strftime', '1',
             '-hls_segment_filename', segmentPath,
             '-tune', 'zerolatency',
             outputPath
