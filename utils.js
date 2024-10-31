@@ -155,6 +155,7 @@ const startFFmpeg = async (streamUrl, output) => {
             '-timeout', '30',
             '-reconnect', '1',
             '-reconnect_at_eof', '1',
+            '-threads', '3',
             outputPath                             
         ], { detached: true, stdio: 'pipe', });
 
