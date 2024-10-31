@@ -158,9 +158,9 @@ const startFFmpeg = async (streamUrl, output) => {
             outputPath                             
         ], { detached: true, stdio: 'pipe', });
 
-        // ffmpeg.stderr.on('data', (data) => {
-        //     console.log(data.toString());
-        // });
+        ffmpeg.stderr.on('data', (data) => {
+            console.log(data.toString());
+        });
 
         ffmpeg.on('error', (err) => {
             console.error('Failed to start subprocess:', err);
