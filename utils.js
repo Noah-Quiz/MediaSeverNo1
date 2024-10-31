@@ -86,6 +86,7 @@ const getMessage = async (queueName) => {
 
                                     // Upload to Bunny Storage
                                     const bunnyOutputDir = path.join(bunnyDir, id);
+                                    const liveStreamOutputDir = path.join(liveStreamDir, id);
                                     if (!fs.existsSync(bunnyOutputDir)) {
                                         fs.mkdirSync(bunnyOutputDir, { recursive: true });
                                     }
@@ -93,7 +94,9 @@ const getMessage = async (queueName) => {
                                     // Define m3u8 file name
                                     const m3u8FileName = `${id}.m3u8`;
 
-                                    handleStreamFinish(bunnyOutputDir, m3u8FileName, id);
+                                    await handleStreamFinish(bunnyOutputDir, m3u8FileName, id);
+
+                                    cleanUpFile(bunnyOutputDir, liveStreamOutputDir);
 
                                     await sendToQueue("live_stream.disconnected", {
                                         live_input_id: id,
@@ -124,6 +127,9 @@ const getMessage = async (queueName) => {
 // Start FFmpeg process
 const startFFmpeg = async (streamUrl, output) => {
     try {
+        const timestamp = moment().format("YMMDD-HHmmss");
+        writeTimestamp(output, timestamp);
+
         const outputDir = path.join(liveStreamDir, output);
         if (!fs.existsSync(outputDir)) {
             fs.mkdirSync(outputDir, { recursive: true });
@@ -191,17 +197,17 @@ const startFFmpeg = async (streamUrl, output) => {
                     return;
                 }
                 
-                const thumbnailFileName = await uploadThumbnail(bunnyOutputDir, output);
+                const thumbnailFileName = await uploadThumbnail(bunnyOutputDir, `${output}-${timestamp}`);
                 
                 await sendToQueue("bunny_livestream_thumbnail", {
                     live_input_output: output,
-                    thumbnailUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${output}/${thumbnailFileName}`,
+                    thumbnailUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${output}-${timestamp}/${thumbnailFileName}`,
                 });
             } catch (error) {
                 console.error("Error uploading thumbnail");
                 return
             }
-        }, 15000);
+        }, 10000);
     } catch (error) {
         console.error("Error starting FFmpeg:", error);
     }
@@ -268,22 +274,42 @@ const createM3U8WithFFmpeg = async (liveStreamOutputDir, bunnyOutputDir, m3u8Fil
 // Main function to handle the stream finishing
 const handleStreamFinish = async (bunnyOutputDir, m3u8FileName, identifier) => {
     try {
+        const timestamp = moment().format("YMMDD-HHmmss");
+
         const liveStreamOutputDir = path.join(liveStreamDir, identifier);
-        const tsDir = path.join(liveStreamDir, identifier);
 
         await createM3U8WithFFmpeg(liveStreamOutputDir, bunnyOutputDir, identifier, 300);
 
         // Upload files
-        await deleteFromBunnyCDN(identifier);
         await replaceTsFilePath(path.join(bunnyOutputDir, m3u8FileName), identifier);
-        await uploadTsFiles(tsDir, identifier, 300);
-        await uploadToBunnyCDN(path.join(bunnyOutputDir, m3u8FileName), identifier, m3u8FileName);
+        await uploadTsFiles(liveStreamOutputDir, identifier, 300);
+        await uploadToBunnyCDN(path.join(bunnyOutputDir, m3u8FileName), `${identifier}-${timestamp}`, m3u8FileName);
     } catch (error) {
         console.error("Error: ", error);
     }
 };
 
-// handleStreamFinish(path.join(bunnyDir, "a4f7db73deb6ae77da1d61d5038a9486"), "a4f7db73deb6ae77da1d61d5038a9486.m3u8", "a4f7db73deb6ae77da1d61d5038a9486");
+
+const cleanUpFile = (bunnyOutputDir, liveStreamOutputDir) => {
+    try {
+        if (fs.existsSync(bunnyOutputDir)) {
+            fs.rmSync(bunnyOutputDir, { recursive: true });
+            console.log(`Deleted Bunny directory: ${bunnyOutputDir}`);
+        } else {
+            console.log(`Bunny directory does not exist: ${bunnyOutputDir}`);
+        }
+
+        if (fs.existsSync(liveStreamOutputDir)) {
+            fs.rmSync(liveStreamOutputDir, { recursive: true });
+            console.log(`Deleted Live Stream directory: ${liveStreamOutputDir}`);
+        } else {
+            console.log(`Live Stream directory does not exist: ${liveStreamOutputDir}`);
+        }
+    } catch (error) {
+        console.error("Error cleaning up file:", error);
+    }
+};
+
 
 // Stop FFmpeg process
 const stopFFmpeg = async (identifier, hasEndTag) => {
@@ -310,6 +336,45 @@ const stopFFmpeg = async (identifier, hasEndTag) => {
         console.error(`Failed to stop FFmpeg for ${identifier}:`, err.message);
     }
 };
+
+function writeTimestamp(identifier, timestamp) {
+    try {
+        const dirPath = path.join(liveStreamDir, identifier);
+        const filePath = path.join(dirPath, 'timestamp.txt');
+
+        // Ensure the directory exists
+        if (!fs.existsSync(dirPath)) {
+            fs.mkdirSync(dirPath, { recursive: true });
+        }
+
+        // Write timestamp to the file
+        fs.writeFileSync(filePath, timestamp);
+        console.log(`Timestamp written to ${filePath}`);
+    } catch (error) {
+        console.error("Error writing timestamp to file");
+    }
+}
+
+function retrieveTimestamp(identifier) {
+    try {
+        const dirPath = path.join(liveStreamDir, identifier);
+        const filePath = path.join(dirPath, 'timestamp.txt');
+
+        // Check if the file exists
+        if (!fs.existsSync(filePath)) {
+            console.error("Timestamp file does not exist.");
+            return null;
+        }
+
+        // Read the timestamp from the file
+        const timestampContent = fs.readFileSync(filePath, 'utf-8');
+        console.log(`Retrieved timestamp: ${timestampContent}`);
+        return timestampContent;
+    } catch (error) {
+        console.error("Error retrieving timestamp from file:", error);
+        return null;
+    }
+}
 
 const createThumbnail = async (bunnyOutputDir, liveStreamOutputDir) => {
     try {
@@ -388,7 +453,7 @@ const createThumbnail = async (bunnyOutputDir, liveStreamOutputDir) => {
 
 
 const uploadToBunnyCDN = async (filePath, identifier, fileName) => {
-    try {
+    return new Promise((resolve, reject) => {
         const readStream = fs.createReadStream(filePath);
         const storageZone = process.env.BUNNY_STORAGE_ZONE_NAME;
         const path = `/${storageZone}/video/${identifier}/${fileName}`;
@@ -400,27 +465,34 @@ const uploadToBunnyCDN = async (filePath, identifier, fileName) => {
             headers: {
                 AccessKey: process.env.BUNNY_STORAGE_PASSWORD,
                 "Content-Type": "application/octet-stream",
-                "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate", // Disable caching
+                "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
                 Expires: "0",
                 Pragma: "no-cache",
             },
         };
 
         const req = https.request(options, (res) => {
+            let responseData = '';
+
             res.on("data", (chunk) => {
-                console.log(chunk.toString("utf8"));
+                responseData += chunk.toString("utf8");
+            });
+
+            res.on("end", () => {
+                console.log("Upload completed:", responseData);
+                resolve();
             });
         });
 
         req.on("error", (error) => {
-            console.error(error);
+            console.error("Upload error:", error);
+            reject(error);
         });
 
         readStream.pipe(req);   
-    } catch (error) {
-        console.error("Error uploading to Bunny: ", error);
-    }
+    });
 };
+
 
 // Function to delete folder or file from BunnyCDN
 const deleteFromBunnyCDN = async (folder, fileName) => {
@@ -515,6 +587,8 @@ const replaceTsFilePath = async (m3u8FilePath, identifier) => {
 // Function to upload .ts segment files
 const uploadTsFiles = async (outputDir, identifier, second = 300) => {
     try {
+        const timestamp = moment().format("YMMDD-HHmmss");
+
         const tsFiles = fs.readdirSync(outputDir)
             .filter(file => file.endsWith('.ts') && file.includes(identifier))
             .sort();
@@ -536,7 +610,7 @@ const uploadTsFiles = async (outputDir, identifier, second = 300) => {
 
         for (const file of selectedFiles) {
             const filePath = path.join(outputDir, file);
-            await uploadToBunnyCDN(filePath, identifier, file);
+            await uploadToBunnyCDN(filePath, `${identifier}-${timestamp}`, file);
         }
         
         console.log(`Uploaded ts files successfully`);
