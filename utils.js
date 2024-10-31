@@ -139,6 +139,7 @@ const startFFmpeg = async (streamUrl, output) => {
         const segmentPath = path.join(outputDir, `${output}-segment-%Y%m%d-%H%M%S.ts`);
 
         const ffmpeg = spawn('ffmpeg', [
+            '-rtbufsize', '250M',
             '-i', streamUrl,
             '-c:v', 'libx264',
             '-c:a', 'copy',
