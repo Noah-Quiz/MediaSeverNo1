@@ -152,8 +152,15 @@ const startFFmpeg = async (streamUrl, output) => {
             '-hls_flags', 'independent_segments',
             '-strftime', '1',
             '-hls_segment_filename', segmentPath,
+            '-timeout', '30',
+            '-reconnect', '1',
+            '-reconnect_at_eof', '1',
             outputPath                             
         ], { detached: true, stdio: 'pipe', });
+
+        // ffmpeg.stderr.on('data', (data) => {
+        //     console.log(data.toString());
+        // });
 
         ffmpeg.on('error', (err) => {
             console.error('Failed to start subprocess:', err);
