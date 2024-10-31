@@ -130,42 +130,24 @@ const startFFmpeg = async (streamUrl, output) => {
         }
 
         const outputPath = path.join(outputDir, `${output}.m3u8`);
-        const segmentPath = path.join(outputDir, `${output}-segment-%06d.ts`);
-
-        // const ffmpeg = spawn('ffmpeg', [
-        //     '-i', streamUrl,
-        //     '-c:v', 'copy',
-        //     '-c:a', 'copy',
-        //     '-f', 'hls',
-        //     '-hls_time', '2',
-        //     '-hls_list_size', '2',
-        //     '-hls_flags', 'split_by_time',
-        //     '-hls_segment_filename', segmentPath,
-        //     '-tune', 'zerolatency',
-        //     outputPath
-        // ], { detached: true, stdio: 'ignore' });
+        const segmentPath = path.join(outputDir, `${output}-segment-%Y%m%d-%H%M%S.ts`);
 
         const ffmpeg = spawn('ffmpeg', [
             '-i', streamUrl,
             '-c:v', 'libx264',
             '-c:a', 'copy',
             '-bsf:a', 'aac_adtstoasc',
-            '-g', '60',
-            '-keyint_min', '60',
+            '-g', '30',
+            '-keyint_min', '30',
             '-f', 'hls',
-            '-hls_time', '2',                      
+            '-hls_time', '1',                      
             '-hls_list_size', '3',                 
             '-hls_segment_type', 'mpegts',           
             '-hls_flags', 'independent_segments',
+            '-strftime', '1',
             '-hls_segment_filename', segmentPath,
             outputPath                             
         ], { detached: true, stdio: 'pipe', });
-
-        ffmpeg.stderr.on('data', (data) => {
-            // console.error(`FFmpeg stderr: ${data.toString()}`);
-        });
-
-        ffmpeg.unref();
 
         ffmpeg.on('error', (err) => {
             console.error('Failed to start subprocess:', err);
@@ -257,15 +239,15 @@ const createM3U8WithFFmpeg = async (liveStreamOutputDir, bunnyOutputDir, m3u8Fil
         // Write the M3U8 playlist manually
         const m3u8Content = [
             '#EXTM3U',
-            '#EXT-X-VERSION:3',
-            '#EXT-X-TARGETDURATION:2',
+            '#EXT-X-VERSION:6',
+            '#EXT-X-TARGETDURATION:1',
             '#EXT-X-MEDIA-SEQUENCE:0',
         ];
 
         // Add each TS file to the playlist
         selectedFiles.forEach(tsFile => {
             const tsFileName = path.basename(tsFile);
-            m3u8Content.push(`#EXTINF:2.0,`);
+            m3u8Content.push(`#EXTINF:1.0,`);
             m3u8Content.push(tsFileName.replace(/\\/g, '/')); 
         });
 
@@ -403,34 +385,6 @@ const createThumbnail = async (bunnyOutputDir, liveStreamOutputDir) => {
         throw error;
     }
 };
-
-const getTsFileDuration = (tsFilePath) => {
-    return new Promise((resolve, reject) => {
-        const ffprobe = spawn("ffprobe", [
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            tsFilePath,
-        ]);
-
-        let output = "";
-        ffprobe.stdout.on("data", (data) => {
-            output += data;
-        });
-
-        ffprobe.on("close", (code) => {
-            if (code === 0) {
-                resolve(parseFloat(output));
-            } else {
-                reject(new Error(`Failed to get duration for file: ${tsFilePath}`));
-            }
-        });
-    });
-};
-
 
 
 const uploadToBunnyCDN = async (filePath, identifier, fileName) => {
