@@ -84,22 +84,19 @@ const getMessage = async (queueName) => {
                                 case "live_input.disconnected":
                                     await stopFFmpeg(id, false);
 
+                                    // Retrieve timestamp
+                                    const timestamp = retrieveTimestamp(id);
+
                                     // Upload to Bunny Storage
-                                    const bunnyOutputDir = path.join(bunnyDir, id);
-                                    const liveStreamOutputDir = path.join(liveStreamDir, id);
+                                    const bunnyOutputDir = path.join(bunnyDir, `${id}-${timestamp}`);
                                     if (!fs.existsSync(bunnyOutputDir)) {
                                         fs.mkdirSync(bunnyOutputDir, { recursive: true });
                                     }
-
-                                    // Retrieve timestamp
-                                    const timestamp = retrieveTimestamp(id);
 
                                     // Define m3u8 file name
                                     const m3u8FileName = `${id}.m3u8`;
 
                                     await handleStreamFinish(bunnyOutputDir, m3u8FileName, id);
-
-                                    cleanUpFile(bunnyOutputDir, liveStreamOutputDir);
 
                                     await sendToQueue("live_stream.disconnected", {
                                         live_input_id: id,
@@ -133,7 +130,7 @@ const startFFmpeg = async (streamUrl, output) => {
         const timestamp = moment().format("YMMDD-HHmmss");
         writeTimestamp(output, timestamp);
 
-        const outputDir = path.join(liveStreamDir, output);
+        const outputDir = path.join(liveStreamDir, `${output}-${timestamp}`);
         if (!fs.existsSync(outputDir)) {
             fs.mkdirSync(outputDir, { recursive: true });
         }
@@ -191,8 +188,8 @@ const startFFmpeg = async (streamUrl, output) => {
         // Generate thumbnail for livestream
         setTimeout(async () => {
             try {
-                const bunnyOutputDir = path.join(bunnyDir, output);
-                const liveStreamOutputDir = path.join(liveStreamDir, output);
+                const bunnyOutputDir = path.join(bunnyDir, `${output}-${timestamp}`);
+                const liveStreamOutputDir = path.join(liveStreamDir, `${output}-${timestamp}`);
                 
                 try {
                     await createThumbnail(bunnyOutputDir, liveStreamOutputDir);
@@ -277,9 +274,10 @@ const createM3U8WithFFmpeg = async (liveStreamOutputDir, bunnyOutputDir, m3u8Fil
 // Main function to handle the stream finishing
 const handleStreamFinish = async (bunnyOutputDir, m3u8FileName, identifier) => {
     try {
-        const timestamp = moment().format("YMMDD-HHmmss");
+        // Retrieve timestamp
+        const timestamp = retrieveTimestamp(identifier);
 
-        const liveStreamOutputDir = path.join(liveStreamDir, identifier);
+        const liveStreamOutputDir = path.join(liveStreamDir, `${identifier}-${timestamp}`);
 
         await createM3U8WithFFmpeg(liveStreamOutputDir, bunnyOutputDir, identifier, 300);
 
@@ -342,7 +340,7 @@ const stopFFmpeg = async (identifier, hasEndTag) => {
 
 function writeTimestamp(identifier, timestamp) {
     try {
-        const dirPath = path.join(liveStreamDir, identifier);
+        const dirPath = path.join(liveStreamDir, `${identifier}-${timestamp}`);
         const filePath = path.join(dirPath, 'timestamp.txt');
 
         // Ensure the directory exists
@@ -360,8 +358,9 @@ function writeTimestamp(identifier, timestamp) {
 
 function retrieveTimestamp(identifier) {
     try {
-        const dirPath = path.join(liveStreamDir, identifier);
-        const filePath = path.join(dirPath, 'timestamp.txt');
+        const sortedDirs = getSortedDirectories(identifier);
+        const recentDir = sortedDirs[0];
+        const filePath = path.join(recentDir.path, 'timestamp.txt');
 
         // Check if the file exists
         if (!fs.existsSync(filePath)) {
@@ -377,6 +376,24 @@ function retrieveTimestamp(identifier) {
         console.error("Error retrieving timestamp from file:", error);
         return null;
     }
+}
+
+function getSortedDirectories(identifier) {
+    const baseDir = liveStreamDir;
+
+    // Read the base directory
+    const dirs = fs.readdirSync(baseDir, { withFileTypes: true })
+        .filter(dir => dir.isDirectory() && dir.name.startsWith(identifier))
+        .map(dir => ({
+            name: dir.name,
+            path: path.join(baseDir, dir.name),
+            timestamp: fs.statSync(path.join(baseDir, dir.name)).birthtime
+        }));
+
+    // Sort directories by timestamp in descending order (most recent first)
+    const sortedDirs = dirs.sort((a, b) => b.timestamp - a.timestamp); // most recent first
+
+    return sortedDirs;
 }
 
 const createThumbnail = async (bunnyOutputDir, liveStreamOutputDir) => {
@@ -572,7 +589,10 @@ const purgeBunnyCDNCache = async () => {
 
 // Function to replace .ts file paths in .m3u8 with BunnyCDN URLs
 const replaceTsFilePath = async (m3u8FilePath, identifier) => {
-    const cdnUrl = `https://${process.env.BUNNY_DOMAIN}/video/${identifier}`;
+    // Retrieve timestamp
+    const timestamp = retrieveTimestamp(identifier);
+
+    const cdnUrl = `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${identifier}-${timestamp}`;
     let m3u8Content = fs.readFileSync(m3u8FilePath, "utf8");
 
     const regex = new RegExp(
@@ -590,8 +610,9 @@ const replaceTsFilePath = async (m3u8FilePath, identifier) => {
 // Function to upload .ts segment files
 const uploadTsFiles = async (outputDir, identifier, second = 300) => {
     try {
-        const timestamp = moment().format("YMMDD-HHmmss");
-
+        // Retrieve timestamp
+        const timestamp = retrieveTimestamp(identifier);
+        
         const tsFiles = fs.readdirSync(outputDir)
             .filter(file => file.endsWith('.ts') && file.includes(identifier))
             .sort();
