@@ -129,22 +129,41 @@ const startFFmpeg = async (streamUrl, output) => {
             fs.mkdirSync(outputDir, { recursive: true });
         }
 
-        const outputFileName = `${output}.m3u8`;
-        const outputPath = path.join(outputDir, outputFileName);
+        const outputPath = path.join(outputDir, `${output}.m3u8`);
         const segmentPath = path.join(outputDir, `${output}-segment-%06d.ts`);
+
+        // const ffmpeg = spawn('ffmpeg', [
+        //     '-i', streamUrl,
+        //     '-c:v', 'copy',
+        //     '-c:a', 'copy',
+        //     '-f', 'hls',
+        //     '-hls_time', '2',
+        //     '-hls_list_size', '2',
+        //     '-hls_flags', 'split_by_time',
+        //     '-hls_segment_filename', segmentPath,
+        //     '-tune', 'zerolatency',
+        //     outputPath
+        // ], { detached: true, stdio: 'ignore' });
 
         const ffmpeg = spawn('ffmpeg', [
             '-i', streamUrl,
-            '-c:v', 'copy',
+            '-c:v', 'libx264',
             '-c:a', 'copy',
+            '-bsf:a', 'aac_adtstoasc',
+            '-g', '60',
+            '-keyint_min', '60',
             '-f', 'hls',
-            '-hls_time', '2',
-            '-hls_list_size', '2',
-            '-hls_flags', 'split_by_time',
+            '-hls_time', '2',                      
+            '-hls_list_size', '3',                 
+            '-hls_segment_type', 'mpegts',           
+            '-hls_flags', 'independent_segments',
             '-hls_segment_filename', segmentPath,
-            '-tune', 'zerolatency',
-            outputPath
-        ], { detached: true, stdio: 'ignore' });
+            outputPath                             
+        ], { detached: true, stdio: 'pipe', });
+
+        ffmpeg.stderr.on('data', (data) => {
+            // console.error(`FFmpeg stderr: ${data.toString()}`);
+        });
 
         ffmpeg.unref();
 
@@ -616,4 +635,4 @@ const retrieveCloudFlareStreamLiveInput = async (uid) => {
     }
 };
 
-module.exports = { sendToQueue, getMessage };
+module.exports = { sendToQueue, getMessage, startFFmpeg };

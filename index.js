@@ -54,7 +54,6 @@ try {
   console.error("Error consuming queue: ", error);
 }
 
-
 // Start server
 const port = process.env.DEVELOPMENT_PORT || 3101;
 
