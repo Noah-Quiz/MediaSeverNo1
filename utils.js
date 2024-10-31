@@ -91,6 +91,9 @@ const getMessage = async (queueName) => {
                                         fs.mkdirSync(bunnyOutputDir, { recursive: true });
                                     }
 
+                                    // Retrieve timestamp
+                                    const timestamp = retrieveTimestamp(id);
+
                                     // Define m3u8 file name
                                     const m3u8FileName = `${id}.m3u8`;
 
@@ -100,7 +103,7 @@ const getMessage = async (queueName) => {
 
                                     await sendToQueue("live_stream.disconnected", {
                                         live_input_id: id,
-                                        streamOnlineUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${id}/${m3u8FileName}`
+                                        streamOnlineUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${id}-${timestamp}/${m3u8FileName}`
                                     });
                                     
                                     break;
@@ -200,7 +203,7 @@ const startFFmpeg = async (streamUrl, output) => {
                 const thumbnailFileName = await uploadThumbnail(bunnyOutputDir, `${output}-${timestamp}`);
                 
                 await sendToQueue("bunny_livestream_thumbnail", {
-                    live_input_output: output,
+                    live_input_id: output,
                     thumbnailUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${output}-${timestamp}/${thumbnailFileName}`,
                 });
             } catch (error) {
