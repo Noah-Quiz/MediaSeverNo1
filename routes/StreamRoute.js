@@ -8,7 +8,7 @@ const path = require('path');
 streamRoutes.delete("/live-stream", (req, res) => {
     const liveStreamDir = path.join(process.cwd(), 'live-stream');
     
-    try {
+    try { 
         if (fs.existsSync(liveStreamDir)) {
             fs.rmSync(liveStreamDir, { recursive: true, force: true });
             res.status(200).json({ message: 'Live stream folder deleted successfully.' });
