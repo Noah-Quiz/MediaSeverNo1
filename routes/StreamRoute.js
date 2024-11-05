@@ -15,6 +15,7 @@ streamRoutes.delete("/live-stream", (req, res) => {
         } else {
             res.status(404).json({ message: 'Live stream folder not found.' });
         }
+        
     } catch (error) {
         console.error('Error deleting live stream folder:', error);
         res.status(500).json({ message: 'Error deleting live stream folder.' });
