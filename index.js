@@ -7,7 +7,10 @@ const { sendToQueue, getMessage } = require("./utils");
 const cloudflareRoutes = require("./routes/CloudflareRoute");
 const streamRoutes = require("./routes/StreamRoute");
 const ffmpegRoutes = require("./routes/FfmpegRoute");
+const getLogger = require("./logger");
 const app = express();
+const rabbitMqLogger = getLogger("RABBITMQ");
+const cloudflareLogger = getLogger("CLOUDFLARE")
 
 // Middleware
 app.use(
@@ -43,7 +46,8 @@ app.post("/api/webhooks/cloudflare", async (req, res) => {
 
     res.status(200).json({ message: "OK" });
   } catch (error) {
-    res.status(500).json({ error: "Failed to process webhook" });
+    cloudflareLogger.error("Failed to process webhook from Cloudflare");
+    res.status(500).json({ error: "Failed to process webhook from Cloudflare" });
   }
 })
 
@@ -54,7 +58,7 @@ app.use("/api/ffmpeg/", ffmpegRoutes);
 try {
   getMessage(`cloudflare.livestream`);
 } catch (error) {
-  console.error("Error consuming queue: ", error);
+  rabbitMqLogger.error("Error consuming queue: ", error);
 }
 
 // Start server

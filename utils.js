@@ -1,12 +1,19 @@
+require("dotenv").config();
 const amqp = require("amqplib");
 const fs = require('fs');
 const path = require('path');
 const https = require("https");
 const { spawn, exec } = require('child_process');
-const ffmpeg = require('fluent-ffmpeg');
 const moment = require("moment");
 const { default: axios } = require("axios");
-require("dotenv").config();
+const getLogger = require("./logger");
+const bunnyLogger = getLogger("BUNNYCDN");
+const ffmpegLogger = getLogger("FFMPEG");
+const rabbitMqLogger = getLogger("RABBITMQ");
+const cloudflareLogger = getLogger("CLOUDFLARE");
+const thumbnailLogger = getLogger("THUMBNAIL");
+const streamLogger = getLogger("STREAM")
+const fileLogger = getLogger("FILE")
 
 // RabbitMQ connection URL
 const rabbitMQUrl = `amqp://${process.env.RABBITMQ_USER}:${process.env.RABBITMQ_PASS}@${process.env.RABBITMQ_URL}` || `amqp://livestream_1:DMCF5qyDg6wx2g3m8n@62.77.156.171`;
@@ -26,11 +33,14 @@ if (!fs.existsSync(pidDir)) {
 }
 
 // Function to send message to RabbitMQ queue
+// Function to send message to RabbitMQ queue
 const sendToQueue = async (queueName, message) => {
-    console.log("Sending queue: ", queueName);
+    rabbitMqLogger.info(`Sending message to queue: ${queueName}`);
+    let connection;
+    let channel;
     try {
-        const connection = await amqp.connect(rabbitMQUrl);
-        const channel = await connection.createChannel();
+        connection = await amqp.connect(rabbitMQUrl);
+        channel = await connection.createChannel();
 
         await channel.assertQueue(queueName, { durable: true });
 
@@ -38,20 +48,37 @@ const sendToQueue = async (queueName, message) => {
             persistent: true,
         });
 
-        await channel.close();
-        await connection.close();
+        rabbitMqLogger.info(`Message sent to queue: ${queueName}`);
     } catch (error) {
-        console.error("Error sending to RabbitMQ:", error);
+        rabbitMqLogger.error(`Error sending to RabbitMQ: ${error.message}`);
+        rabbitMqLogger.error(`Stack trace: ${error.stack}`);
         throw error;
+    } finally {
+        if (channel) {
+            try {
+                await channel.close();
+            } catch (err) {
+                rabbitMqLogger.error(`Error closing RabbitMQ channel: ${err.message}`);
+            }
+        }
+        if (connection) {
+            try {
+                await connection.close();
+            } catch (err) {
+                rabbitMqLogger.error(`Error closing RabbitMQ connection: ${err.message}`);
+            }
+        }
     }
 };
 
-// Function to process messages from RabbitMQ
+
 const getMessage = async (queueName) => {
-    console.log("Consuming queue: ", queueName);
+    rabbitMqLogger.info(`Consuming queue: ${queueName}`);
+    let connection;
+    let channel;
     try {
-        const connection = await amqp.connect(rabbitMQUrl);
-        const channel = await connection.createChannel();
+        connection = await amqp.connect(rabbitMQUrl);
+        channel = await connection.createChannel();
 
         await channel.assertQueue(queueName, { durable: true });
 
@@ -59,68 +86,70 @@ const getMessage = async (queueName) => {
             if (msg !== null) {
                 try {
                     const messageContent = msg.content.toString();
-                    const parsedMessage = JSON.parse(messageContent);
+                    let parsedMessage;
 
-                    console.log(`Cloudflare Event: `, parsedMessage.data?.event_type);
+                    try {
+                        parsedMessage = JSON.parse(messageContent);
+                    } catch (parseError) {
+                        rabbitMqLogger.error(`Error parsing message content: ${messageContent}`);
+                        channel.nack(msg, true, false); // Reject and requeue the message for later retry
+                        return; // Exit to avoid further processing
+                    }
+
+                    cloudflareLogger.info(`Cloudflare Event: ${parsedMessage.data?.event_type}`);
 
                     const id = parsedMessage.data?.input_id;
                     switch (queueName) {
                         case "cloudflare.livestream":
-                            // Extract event type
                             const event = parsedMessage.data?.event_type;
 
                             // Retrieve stream key using input id
                             const stream = await retrieveCloudFlareStreamLiveInput(id);
                             const rtmpsUrl = stream?.rtmpsPlayback?.url;
                             const streamKey = stream?.rtmpsPlayback?.streamKey;
-                            
+
                             const streamServer = `${rtmpsUrl}${streamKey}`;
                             switch (event) {
                                 case "live_input.connected":
                                     await startFFmpeg(streamServer, id);
-
                                     break;
 
                                 case "live_input.disconnected":
                                     await stopFFmpeg(id, false);
-
-                                    // Retrieve timestamp
                                     const timestamp = retrieveTimestamp(id);
 
-                                    // Upload to Bunny Storage
                                     const bunnyOutputDir = path.join(bunnyDir, `${id}-${timestamp}`);
                                     if (!fs.existsSync(bunnyOutputDir)) {
                                         fs.mkdirSync(bunnyOutputDir, { recursive: true });
                                     }
 
-                                    // Define m3u8 file name
                                     const m3u8FileName = `${id}.m3u8`;
-
                                     await handleStreamFinish(bunnyOutputDir, m3u8FileName, id);
 
                                     await sendToQueue("live_stream.disconnected", {
                                         live_input_id: id,
                                         streamOnlineUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${id}-${timestamp}/${m3u8FileName}`
                                     });
-                                    
                                     break;
 
                                 case "live_input.errored":
-                                    console.log("Cloudflare Error");
+                                    cloudflareLogger.error("Cloudflare returned event live_input.errored");
                                     break;
                             }
                             break;
                     }
 
-                    channel.ack(msg);
+                    channel.ack(msg); 
                 } catch (error) {
-                    console.error(`Error while processing message: ${error}`);
-                    channel.nack(msg, true, false);
+                    rabbitMqLogger.error(`Error while processing message: ${error.message}`);
+                    rabbitMqLogger.error(`Stack trace: ${error.stack}`);
+                    channel.nack(msg, true, false); // Reject and requeue the message for later retry
                 }
             }
         });
     } catch (error) {
-        console.error("Error consuming from RabbitMQ:", error);
+        rabbitMqLogger.error(`Error consuming from RabbitMQ: ${error.message}`);
+        rabbitMqLogger.error(`Stack trace: ${error.stack}`);
     }
 };
 
@@ -150,7 +179,7 @@ const startFFmpeg = async (streamUrl, output) => {
             '-g', '30',
             '-keyint_min', '30',
             '-f', 'hls',
-            '-hls_time', '1',                      
+            '-hls_time', '1',                       
             '-hls_list_size', '3',                 
             '-hls_segment_type', 'mpegts', 
             '-hls_flags', 'independent_segments',
@@ -163,19 +192,19 @@ const startFFmpeg = async (streamUrl, output) => {
         ], { detached: true, stdio: 'pipe', });
 
         ffmpeg.stderr.on('data', (data) => {
-            console.log(data.toString());
+            ffmpegLogger.info(data.toString());
         });
 
         ffmpeg.on('error', (err) => {
-            console.error('Failed to start subprocess:', err);
+            ffmpegLogger.error(`Failed to start subprocess: ${err.message}`);
         });
         
         ffmpeg.on('exit', (code, signal) => {
             if (code) {
-                console.error(`FFmpeg exited with code ${code}`);
+                ffmpegLogger.error(`FFmpeg exited with code ${code}`);
             }
             if (signal) {
-                console.error(`FFmpeg was killed with signal ${signal}`);
+                ffmpegLogger.error(`FFmpeg was killed with signal ${signal}`);
             }
         });
         
@@ -188,7 +217,7 @@ const startFFmpeg = async (streamUrl, output) => {
         const pidFilePath = path.join(pidDir, `ffmpeg-${output}-pid.pid`);
         fs.writeFileSync(pidFilePath, ffmpeg.pid.toString());
 
-        console.log(`FFmpeg started with PID: ${ffmpeg.pid}`);
+        ffmpegLogger.info(`FFmpeg started with PID: ${ffmpeg.pid}`);
 
         // Send to queue live event
         await sendToQueue("live_stream.connected", {
@@ -204,23 +233,22 @@ const startFFmpeg = async (streamUrl, output) => {
                 
                 try {
                     await createThumbnail(bunnyOutputDir, liveStreamOutputDir);
+                    const thumbnailFileName = await uploadThumbnail(bunnyOutputDir, `${output}-${timestamp}`);
+                    
+                    await sendToQueue("bunny_livestream_thumbnail", {
+                        live_input_id: output,
+                        thumbnailUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${output}-${timestamp}/${thumbnailFileName}`,
+                    });
+                    thumbnailLogger.info(`Thumbnail generated for stream ${output}`);
                 } catch (error) {
-                    return;
+                    thumbnailLogger.error(`Error creating/uploading thumbnail for ${output}: ${error.message}`);
                 }
-                
-                const thumbnailFileName = await uploadThumbnail(bunnyOutputDir, `${output}-${timestamp}`);
-                
-                await sendToQueue("bunny_livestream_thumbnail", {
-                    live_input_id: output,
-                    thumbnailUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${output}-${timestamp}/${thumbnailFileName}`,
-                });
             } catch (error) {
-                console.error("Error uploading thumbnail");
-                return
+                thumbnailLogger.error(`Error in thumbnail generation setTimeout: ${error.message}`);
             }
-        }, 10000);
+        }, 10000); // 10 seconds delay
     } catch (error) {
-        console.error("Error starting FFmpeg: ", error);
+        ffmpegLogger.error(`Error starting FFmpeg: ${error.message}`);
     }
 };
 
@@ -249,7 +277,7 @@ const createM3U8WithFFmpeg = async (liveStreamOutputDir, bunnyOutputDir, m3u8Fil
         const selectedFiles = tsFiles.slice(start, end);
 
         if (selectedFiles.length === 0) {
-            console.error('No TS files selected for M3U8 creation.');
+            fileLogger.error('No TS files selected for M3U8 creation.');
             return;
         }
 
@@ -274,10 +302,10 @@ const createM3U8WithFFmpeg = async (liveStreamOutputDir, bunnyOutputDir, m3u8Fil
         // Write the content to the M3U8 file
         fs.writeFileSync(m3u8FilePath, m3u8Content.join('\n'));
 
-        console.log(`M3U8 file created successfully at ${m3u8FilePath}`);
+        ffmpegLogger.info(`M3U8 file created successfully at ${m3u8FilePath}`);
 
     } catch (error) {
-        console.error('Error during M3U8 creation process: ', error);
+        ffmpegLogger.error(`Error during M3U8 creation process: ${error.message}`);
     }
 };
 
@@ -287,17 +315,27 @@ const handleStreamFinish = async (bunnyOutputDir, m3u8FileName, identifier) => {
     try {
         // Retrieve timestamp
         const timestamp = retrieveTimestamp(identifier);
-
         const liveStreamOutputDir = path.join(liveStreamDir, `${identifier}-${timestamp}`);
 
+        // Step 1: Create the M3U8 file with FFmpeg
+        ffmpegLogger.info(`Creating M3U8 file for identifier: ${identifier}`);
         await createM3U8WithFFmpeg(liveStreamOutputDir, bunnyOutputDir, identifier, 300);
 
-        // Upload files
+        // Step 2: Replace TS file paths in the M3U8
+        ffmpegLogger.info(`Replacing TS file paths for M3U8 file: ${m3u8FileName}`);
         await replaceTsFilePath(path.join(bunnyOutputDir, m3u8FileName), identifier);
+
+        // Step 3: Upload the TS files
+        ffmpegLogger.info(`Uploading TS files for identifier: ${identifier}`);
         await uploadTsFiles(liveStreamOutputDir, identifier, 300);
+
+        // Step 4: Upload the M3U8 file to Bunny CDN
+        ffmpegLogger.info(`Uploading M3U8 file to Bunny CDN for identifier: ${identifier}`);
         await uploadToBunnyCDN(path.join(bunnyOutputDir, m3u8FileName), `${identifier}-${timestamp}`, m3u8FileName);
+
+        ffmpegLogger.info(`Stream processing finished for identifier: ${identifier}`);
     } catch (error) {
-        console.error("Error finishing stream: ", error);
+        streamLogger.error(`Error finishing stream for identifier ${identifier}: ${error.message}`);
     }
 };
 
@@ -312,18 +350,26 @@ const stopFFmpeg = async (identifier, hasEndTag) => {
         // Stop the FFmpeg process
         process.kill(pid);
         fs.unlinkSync(pidFilePath);
-        console.log(`FFmpeg process with PID ${pid} stopped`);
+        ffmpegLogger.info(`FFmpeg process with PID ${pid} stopped`);
 
         // Find the most recent .m3u8 file in the output directory
         const outputDir = path.join(liveStreamDir, identifier);
-        // Define m3u8 file name
+
+        // Define m3u8 file path
         const m3u8FileName = `${identifier}.m3u8`;
+        const m3u8FilePath = path.join(outputDir, m3u8FileName);
+
+        // Append '#EXT-X-ENDLIST' tag to the m3u8 file if it exists and the end tag is missing
         if (!hasEndTag) {
-            const m3u8FilePath = path.join(outputDir, m3u8FileName);
-            fs.appendFileSync(m3u8FilePath, '#EXT-X-ENDLIST', 'utf8');
+            if (fs.existsSync(m3u8FilePath)) {
+                fs.appendFileSync(m3u8FilePath, '#EXT-X-ENDLIST\n', 'utf8');
+                ffmpegLogger.info(`Appended '#EXT-X-ENDLIST' to ${m3u8FilePath}`);
+            } else {
+                ffmpegLogger.error(`M3U8 file ${m3u8FilePath} not found.`);
+            }
         }
     } catch (error) {
-        console.error(`Failed to stop FFmpeg for ${identifier}:`, error);
+        ffmpegLogger.error(`Failed to stop FFmpeg for ${identifier}: ${error.message}`);
     }
 };
 
@@ -332,37 +378,45 @@ function writeTimestamp(identifier, timestamp) {
         const dirPath = path.join(liveStreamDir, `${identifier}-${timestamp}`);
         const filePath = path.join(dirPath, 'timestamp.txt');
 
-        // Ensure the directory exists
+        // Ensure the directory exists (with recursive flag)
         if (!fs.existsSync(dirPath)) {
             fs.mkdirSync(dirPath, { recursive: true });
+            fileLogger.info(`Directory created: ${dirPath}`);
         }
 
         // Write timestamp to the file
         fs.writeFileSync(filePath, timestamp);
-        console.log(`Timestamp written to ${filePath}`);
+        fileLogger.info(`Timestamp written to ${filePath} for identifier: ${identifier}`);
     } catch (error) {
-        console.error("Error writing timestamp to file: ", error);
+        fileLogger.error(`Error writing timestamp for identifier ${identifier}: ${error.message}`);
     }
 }
 
 function retrieveTimestamp(identifier) {
     try {
         const sortedDirs = getSortedDirectories(identifier);
+
+        // Ensure there's at least one directory
+        if (!sortedDirs || sortedDirs.length === 0) {
+            fileLogger.error(`No directories found for identifier: ${identifier}`);
+            return null;
+        }
+
         const recentDir = sortedDirs[0];
         const filePath = path.join(recentDir.path, 'timestamp.txt');
 
         // Check if the file exists
         if (!fs.existsSync(filePath)) {
-            console.error("Timestamp file does not exist.");
+            fileLogger.error(`Timestamp file does not exist for directory: ${recentDir.path}`);
             return null;
         }
 
         // Read the timestamp from the file
         const timestampContent = fs.readFileSync(filePath, 'utf-8');
-        console.log(`Retrieved timestamp: ${timestampContent}`);
+        fileLogger.info(`Retrieved timestamp for identifier ${identifier}: ${timestampContent}`);
         return timestampContent;
     } catch (error) {
-        console.error("Error retrieving timestamp from file: ", error);
+        fileLogger.error(`Error retrieving timestamp for identifier ${identifier}: ${error.message}`);
         return null;
     }
 }
@@ -385,7 +439,7 @@ function getSortedDirectories(identifier) {
 
         return sortedDirs;
     } catch (error) {
-        console.error("Error getting sorted directories: ", error);
+        fileLogger.error(`Error getting sorted directories: ${error.message}`);
     }
 }
 
@@ -412,18 +466,18 @@ const createThumbnail = async (bunnyOutputDir, liveStreamOutputDir) => {
 
         // Check if the thumbnail already exists
         if (fs.existsSync(outputPath)) {
-            console.log(`Thumbnail already exists at: ${outputPath}`);
+            thumbnailLogger.info(`Thumbnail already exists at: ${outputPath}`);
             return outputPath; // Return immediately if the thumbnail exists
         }
 
         for (const tsFilePath of tsFiles) {
             // Check if the selected TS file exists
             if (!fs.existsSync(tsFilePath)) {
-                console.warn(`TS file not found: ${tsFilePath}, skipping.`);
+                fileLogger.info(`TS file not found: ${tsFilePath}, skipping.`);
                 continue; // Skip this file if it doesn't exist
             }
 
-            console.log(`Creating thumbnail for: ${tsFilePath}`);
+            thumbnailLogger.info(`Creating thumbnail for: ${tsFilePath}`);
 
             try {
                 // Generate a thumbnail from the current TS file using ffmpeg
@@ -437,7 +491,7 @@ const createThumbnail = async (bunnyOutputDir, liveStreamOutputDir) => {
 
                     ffmpeg.on("close", (code) => {
                         if (code === 0) {
-                            console.log(`Thumbnail created at: ${outputPath}`);
+                            ffmpegLogger.info(`Thumbnail created at: ${outputPath}`);
                             resolve(); // Resolve promise on success
                         } else {
                             reject(new Error(`Failed to create thumbnail from ${tsFilePath}, ffmpeg exited with code ${code}`));
@@ -452,14 +506,14 @@ const createThumbnail = async (bunnyOutputDir, liveStreamOutputDir) => {
                 return outputPath; // Return the path of the successfully created thumbnail
 
             } catch (error) {
-                console.error(error.message); // Log the error for this TS file
+                thumbnailLogger.error(error.message); // Log the error for this TS file
             }
         }
 
-        throw new Error("Failed to create a thumbnail from all TS files."); // If no thumbnails were created
+        throw new Error(`Failed to create a thumbnail from all TS files: ${error.message}`); // If no thumbnails were created
 
     } catch (error) {
-        console.error("Error creating thumbnail: ", error);
+        thumbnailLogger.error(`Error creating thumbnail: ${error.message}`);
         throw error;
     }
 };
@@ -467,6 +521,10 @@ const createThumbnail = async (bunnyOutputDir, liveStreamOutputDir) => {
 
 const uploadToBunnyCDN = async (filePath, identifier, fileName) => {
     try {
+        if (!fs.existsSync(filePath)) {
+            throw new Error(`File does not exist at path: ${filePath}`);
+        }
+
         return new Promise((resolve, reject) => {
             const readStream = fs.createReadStream(filePath);
             const storageZone = process.env.BUNNY_STORAGE_ZONE_NAME;
@@ -493,20 +551,20 @@ const uploadToBunnyCDN = async (filePath, identifier, fileName) => {
                 });
 
                 res.on("end", () => {
-                    console.log("Upload completed:", responseData);
+                    bunnyLogger.info(`Upload completed: ${responseData}`);
                     resolve();
                 });
             });
 
             req.on("error", (error) => {
-                console.error("Upload error:", error);
+                bunnyLogger.error(`Upload error: ${error.message}`);
                 reject(error);
             });
 
             readStream.pipe(req);   
         });
     } catch (error) {
-        console.error("Error uploading to Bunny: ", error);
+        bunnyLogger.error(`Error uploading to Bunny: ${error.message}`);
     }
 };
 
@@ -604,7 +662,7 @@ const replaceTsFilePath = async (m3u8FilePath, identifier) => {
 
         fs.writeFileSync(m3u8FilePath, m3u8Content);
     } catch (error) {
-        console.error("Error replacing ts files path: ", error);
+        fileLogger.error(`Error replacing ts files path: ${error.message}`);
     }
 };
 
@@ -629,7 +687,7 @@ const uploadTsFiles = async (outputDir, identifier, second = 300) => {
         const selectedFiles = tsFiles.slice(start, end);
 
         if (selectedFiles.length === 0) {
-            console.error('No TS files selected for upload.');
+            fileLogger.error('No TS files selected for upload.');
             return;
         }
 
@@ -638,9 +696,9 @@ const uploadTsFiles = async (outputDir, identifier, second = 300) => {
             await uploadToBunnyCDN(filePath, `${identifier}-${timestamp}`, file);
         }
         
-        console.log(`Uploaded ts files successfully`);
+        bunnyLogger.info(`Uploaded ts files successfully`);
     } catch (error) {
-        console.error("Error uploading ts files: ", error);
+        bunnyLogger.error(`Error uploading ts files: ${error.message}`);
     }
 };
 
@@ -660,7 +718,7 @@ const uploadThumbnail = async (outputDir, identifier) => {
         }
         return fileName;
     } catch (error) {
-        console.error("Error uploading thumbnail to Bunny: ", error);
+        bunnyLogger.error(`Error uploading thumbnail to Bunny: ${error.message}`);
     }
 };
 
@@ -668,13 +726,13 @@ function killFfmpegProcessesWindow() {
     try {
         exec('tasklist | findstr ffmpeg', (err, stdout, stderr) => {
             if (err && err.code !== 1) {
-                console.error(`Error fetching process list: ${err}`);
+                ffmpegLogger.error(`Error fetching process list: ${err}`);
                 return;
             }
 
             const lines = stdout.trim().split('\n');
             if (lines.length === 0 || lines[0] === '') {
-                console.log('No ffmpeg processes found.');
+                ffmpegLogger.info('No ffmpeg processes found.');
                 return;
             }
 
@@ -690,16 +748,16 @@ function killFfmpegProcessesWindow() {
             // Execute the kill command
             exec(killCommand, (killErr, killStdout, killStderr) => {
                 if (killErr) {
-                    console.error(`Error killing processes: ${killStderr}`);
+                    ffmpegLogger.error(`Error killing processes: ${killStderr}`);
                     return;
                 }
 
                 const successMessages = pids.map(pid => `SUCCESS: The process with PID ${pid} has been terminated.`).join('\n');
-                console.log(successMessages);
+                ffmpegLogger.info(successMessages);
             });
         });
     } catch (error) {
-        console.error("Window: Error killing FFmpeg processes: ", error);
+        ffmpegLogger.error(`Window: Error killing FFmpeg processes: ${error.message}`);
     }
 }
 
@@ -707,14 +765,14 @@ function killFfmpegProcessesLinux() {
     try {
         exec('pgrep -f ffmpeg', (err, stdout, stderr) => {
             if (err) {
-                console.error(`Error fetching process list: ${err}`);
+                ffmpegLogger.error(`Error fetching process list: ${err}`);
                 return;
             }
 
             const pids = stdout.trim().split('\n').map(pid => pid.trim()).filter(Boolean); // Filter out any empty entries
 
             if (pids.length === 0) {
-                console.log('No ffmpeg processes found.');
+                ffmpegLogger.info('No ffmpeg processes found.');
                 return;
             }
 
@@ -723,23 +781,22 @@ function killFfmpegProcessesLinux() {
             // Execute the kill command
             exec(killCommand, (killErr, killStdout, killStderr) => {
                 if (killErr) {
-                    console.error(`Error killing processes: ${killStderr}`);
+                    ffmpegLogger.error(`Error killing processes: ${killStderr}`);
                     return;
                 }
 
                 const successMessages = pids.map(pid => `SUCCESS: The process with PID ${pid} has been terminated.`).join('\n');
-                console.log(successMessages);
+                ffmpegLogger.info(successMessages);
             });
         });
     } catch (error) {
-        console.error("Linux: Error killing FFmpeg processes: ", error);
+        ffmpegLogger.error(`Linux: Error killing FFmpeg processes: ${error.message}`);
     }
 }
 
 const retrieveCloudFlareStreamLiveInput = async (uid) => {
     try {
         let stream = null;
-        let live = null;
         var options = {
             method: "GET",
             url: `${process.env.CLOUDFLARE_STREAM_API_URL}/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/stream/live_inputs/${uid}`,
@@ -754,7 +811,7 @@ const retrieveCloudFlareStreamLiveInput = async (uid) => {
                 stream = response.data.result;
             })
             .catch(function (error) {
-                console.error("Error retrieving live input");
+                cloudflareLogger.error("Error retrieving live input");
             });
         return stream;
     } catch (error) {
