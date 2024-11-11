@@ -561,6 +561,17 @@ const uploadToBunnyCDN = async (filePath, identifier, fileName) => {
                 reject(error);
             });
 
+            readStream.on("error", (error) => {
+                fileLogger.error(`ReadStream error: ${error.message}`);
+                req.destroy(); // Ensure request is terminated
+                reject(error);
+            });
+
+            req.setTimeout(15000, () => {
+                req.destroy();
+                reject(new Error("Upload timed out"));
+            });
+
             readStream.pipe(req);   
         });
     } catch (error) {
