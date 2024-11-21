@@ -10,7 +10,8 @@ const ffmpegRoutes = require("./routes/FfmpegRoute");
 const getLogger = require("./logger");
 const app = express();
 const rabbitMqLogger = getLogger("RABBITMQ");
-const cloudflareLogger = getLogger("CLOUDFLARE")
+const cloudflareLogger = getLogger("CLOUDFLARE");
+const serverLogger = getLogger("SERVER");
 
 // Middleware
 app.use(
@@ -68,9 +69,9 @@ const port = process.env.DEVELOPMENT_PORT || 3101;
 
 app.listen(port, (err) => {
   if (err) {
-    console.log("Failed to start server:", err);
+    serverLogger.error("Failed to start server:", err);
     process.exit(1);
   } else {
-    console.log(`Server is running at: http://localhost:${port}`);
+    serverLogger.info(`Server is running at: http://localhost:${port}`);
   }
 });

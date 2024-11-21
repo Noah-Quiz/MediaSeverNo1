@@ -12,8 +12,9 @@ const ffmpegLogger = getLogger("FFMPEG");
 const rabbitMqLogger = getLogger("RABBITMQ");
 const cloudflareLogger = getLogger("CLOUDFLARE");
 const thumbnailLogger = getLogger("THUMBNAIL");
-const streamLogger = getLogger("STREAM")
-const fileLogger = getLogger("FILE")
+const streamLogger = getLogger("STREAM");
+const fileLogger = getLogger("FILE");
+const debugLogger = getLogger("DEBUG");
 
 // RabbitMQ connection URL
 const rabbitMQUrl = `amqp://${process.env.RABBITMQ_USER}:${process.env.RABBITMQ_PASS}@${process.env.RABBITMQ_URL}` || `amqp://livestream_1:DMCF5qyDg6wx2g3m8n@62.77.156.171`;
@@ -32,7 +33,6 @@ if (!fs.existsSync(pidDir)) {
     fs.mkdirSync(pidDir, { recursive: true });
 }
 
-// Function to send message to RabbitMQ queue
 // Function to send message to RabbitMQ queue
 const sendToQueue = async (queueName, message) => {
     rabbitMqLogger.info(`Sending message to queue: ${queueName}`);
@@ -130,6 +130,10 @@ const getMessage = async (queueName) => {
                                         live_input_id: id,
                                         streamOnlineUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${id}-${timestamp}/${m3u8FileName}`
                                     });
+
+                                    setTimeout(async () => {
+                                        await handleDeleteStreamRelatedFolders(id);
+                                    }, 900000);
                                     break;
 
                                 case "live_input.errored":
@@ -339,6 +343,33 @@ const handleStreamFinish = async (bunnyOutputDir, m3u8FileName, identifier) => {
     }
 };
 
+const handleDeleteStreamRelatedFolders = async (identifier) => {
+    try {
+        // Retrieve timestamp
+        const timestamp = retrieveTimestamp(identifier);
+        const liveStreamOutputDir = path.join(liveStreamDir, `${identifier}-${timestamp}`);
+        const bunnyOutputDir = path.join(bunnyDir, `${identifier}-${timestamp}`);
+
+        // Delete live stream output directory
+        if (fs.existsSync(liveStreamOutputDir)) {
+            await fs.promises.rm(liveStreamOutputDir, { recursive: true, force: true });
+            fileLogger.info(`Deleted folder: ${liveStreamOutputDir}`);
+        } else {
+            fileLogger.warn(`Folder not found: ${liveStreamOutputDir}`);
+        }
+
+        // Delete Bunny output directory
+        if (fs.existsSync(bunnyOutputDir)) {
+            await fs.promises.rm(bunnyOutputDir, { recursive: true, force: true });
+            fileLogger.info(`Deleted folder: ${bunnyOutputDir}`);
+        } else {
+            fileLogger.warn(`Folder not found: ${bunnyOutputDir}`);
+        }
+    } catch (error) {
+        fileLogger.error(`Error cleaning up stream related folders: ${error.message}`);
+    }
+};
+
 // Stop FFmpeg process
 const stopFFmpeg = async (identifier, hasEndTag) => {
     try {
@@ -398,7 +429,7 @@ function retrieveTimestamp(identifier) {
 
         // Ensure there's at least one directory
         if (!sortedDirs || sortedDirs.length === 0) {
-            fileLogger.error(`No directories found for identifier: ${identifier}`);
+            fileLogger.error(`No directories found for identifier ${identifier} to retrieve timestamp`);
             return null;
         }
 
@@ -510,7 +541,7 @@ const createThumbnail = async (bunnyOutputDir, liveStreamOutputDir) => {
             }
         }
 
-        throw new Error(`Failed to create a thumbnail from all TS files: ${error.message}`); // If no thumbnails were created
+        throw new Error(`Failed to create a thumbnail from all TS files`);
 
     } catch (error) {
         thumbnailLogger.error(`Error creating thumbnail: ${error.message}`);
@@ -568,6 +599,7 @@ const uploadToBunnyCDN = async (filePath, identifier, fileName) => {
             });
 
             req.setTimeout(15000, () => {
+                readStream.destroy();
                 req.destroy();
                 reject(new Error("Upload timed out"));
             });
@@ -576,6 +608,7 @@ const uploadToBunnyCDN = async (filePath, identifier, fileName) => {
         });
     } catch (error) {
         bunnyLogger.error(`Error uploading to Bunny: ${error.message}`);
+        await handleDeleteStreamRelatedFolders(identifier);
     }
 };
 
