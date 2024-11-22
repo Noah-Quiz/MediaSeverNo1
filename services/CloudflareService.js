@@ -70,7 +70,7 @@ const createCloudFlareStreamLiveInput = async (creatorId, streamName) => {
         recording: {
           allowedOrigins: ["*"],
           hideLiveViewerCount: false,
-          mode: "off",
+          mode: "automatic",
           requireSignedURLs: false,
           timeoutSeconds: 0,
         },
