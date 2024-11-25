@@ -111,7 +111,7 @@ const getMessage = async (queueName) => {
                             const streamServer = `${rtmpsUrl}${streamKey}`;
                             switch (event) {
                                 case "live_input.connected":
-                                    await startFFmpeg(streamServer, id);
+                                    await startFFmpeg(streamServer, id, false);
                                     break;
 
                                 case "live_input.disconnected":
@@ -158,7 +158,14 @@ const getMessage = async (queueName) => {
 };
 
 // Start FFmpeg process
-const startFFmpeg = async (streamUrl, output) => {
+const startFFmpeg = async (streamUrl, output, autoRecord = true) => {
+    
+    if (!autoRecord) {
+        ffmpegLogger.info(`Auto record is disabled. Skipping FFmpeg start for ${output}`);
+        return;
+    }
+
+
     try {
         const timestamp = moment().format("YMMDD-HHmmss");
         writeTimestamp(output, timestamp);
