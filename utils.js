@@ -239,7 +239,7 @@ const getCloudflareRecordUrl = async (streamId) => {
             const status = result.status?.state;
 
             if (status === "ready") {
-                const hlsUrl = result.playback?.hls;
+                const hlsUrl = result.preview;
                 if (hlsUrl) {
                     return hlsUrl; 
                 } else {
