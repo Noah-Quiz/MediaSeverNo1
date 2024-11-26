@@ -173,6 +173,7 @@ const getMessage = async (queueName) => {
                     const messageContent = msg.content.toString();
                     let parsedMessage;
 
+                    // Parse the message
                     try {
                         parsedMessage = JSON.parse(messageContent);
                     } catch (parseError) {
@@ -193,10 +194,15 @@ const getMessage = async (queueName) => {
                             // Check if the Cloudflare recording is ready
                             const recordUrl = await getCloudflareRecordUrl(id);
 
-                            // Upload the URL to BunnyCDN
-                            await uploadUrlToBunnyCDN(recordUrl, id);
+                            // Download to local storage
+                            const localFilePath = `./videos/${id}.mp4`; 
+                            await downloadToLocal(recordUrl, localFilePath);
 
-                            cloudflareLogger.info(`Stream URL for ${id} successfully uploaded to BunnyCDN`);
+                            // Upload to BunnyCDN
+                            const fileName = `${id}.mp4`;
+                            await uploadToBunnyCDN(localFilePath, id, fileName);
+
+                            cloudflareLogger.info(`Stream ${id} successfully uploaded to BunnyCDN`);
                         } catch (error) {
                             if (error.message.includes("Unable to retrieve record URL")) {
                                 cloudflareLogger.warn(`Recording not ready for stream: ${id}. Requeuing...`);
@@ -224,92 +230,115 @@ const getMessage = async (queueName) => {
     }
 };
 
+
+// Download file to local storage
+const downloadToLocal = async (url, filePath) => {
+    try {
+        const directoryPath = path.dirname(filePath);
+        if (!fs.existsSync(directoryPath)) {
+            fs.mkdirSync(directoryPath, { recursive: true }); 
+            bunnyLogger.info(`Created directory: ${directoryPath}`);
+        }
+
+        // Download the file
+        const response = await axios({
+            method: "get",
+            url: url,
+            responseType: "stream",
+        });
+
+        const writer = fs.createWriteStream(filePath);
+
+        return new Promise((resolve, reject) => {
+            response.data.pipe(writer);
+
+            writer.on("finish", () => {
+                bunnyLogger.info(`File downloaded successfully: ${filePath}`);
+                resolve();
+            });
+
+            writer.on("error", (error) => {
+                bunnyLogger.error(`Error writing file to local storage: ${error.message}`);
+                reject(error);
+            });
+        });
+    } catch (error) {
+        cloudflareLogger.error(`Error downloading file: ${error.message}`);
+        throw error;
+    }
+};
 // Get Cloudflare record URL
 const getCloudflareRecordUrl = async (streamId) => {
     try {
-        const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/stream/${streamId}`;
+        const apiBase = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/stream/${streamId}`;
         const headers = {
             Authorization: `Bearer ${process.env.CLOUDFLARE_API_KEY}`,
         };
 
-        const response = await axios.get(apiUrl, { headers });
+        let streamReady = false;
+        const maxRetries = 5;
+        const delayMs = 5000;
 
-        if (response.data && response.data.result) {
-            const result = response.data.result;
-            const status = result.status?.state;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            const statusResponse = await axios.get(apiBase, { headers });
 
-            if (status === "ready") {
-                const hlsUrl = result.preview;
-                if (hlsUrl) {
-                    return hlsUrl; 
-                } else {
-                    throw new Error("HLS playback URL not available.");
-                }
-            } else {
-                throw new Error(`Video is not ready. Current state: ${status}`);
+            if (statusResponse.data && statusResponse.data.result.status === "ready") {
+                streamReady = true;
+                break;
             }
-        } else {
-            throw new Error("Unable to retrieve video details from Cloudflare.");
+
+            cloudflareLogger.info(
+                `Stream status is not ready yet (attempt ${attempt}/${maxRetries}). Retrying in ${delayMs}ms...`
+            );
+            await new Promise(resolve => setTimeout(resolve, delayMs));
         }
+
+        if (!streamReady) {
+            throw new Error("Stream is not ready after maximum retries.");
+        }
+
+
+
+        const downloadTriggerResponse = await axios.post(`${apiBase}/downloads`, {}, { headers });
+
+        if (!downloadTriggerResponse.data.success) {
+            throw new Error("Failed to trigger the creation of the download URL.");
+        }
+
+
+
+        let downloadUrl = null;
+
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            const downloadUrlResponse = await axios.get(apiBase, { headers });
+
+            if (
+                downloadUrlResponse.data &&
+                downloadUrlResponse.data.result &&
+                downloadUrlResponse.data.result.downloaded_url
+            ) {
+                downloadUrl = downloadUrlResponse.data.result.downloaded_url;
+                break;
+            }
+
+            cloudflareLogger.info(
+                `Download URL not available yet (attempt ${attempt}/${maxRetries}). Retrying in ${delayMs}ms...`
+            );
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+
+        if (!downloadUrl) {
+            throw new Error("Download URL not available after maximum retries.");
+        }
+
+        return downloadUrl;
     } catch (error) {
-        cloudflareLogger.error(`Error fetching HLS URL: ${error.message}`);
+        cloudflareLogger.error(`Error fetching record URL: ${error.message}`);
         throw error;
     }
 };
 
 
-// Upload only the URL to BunnyCDN
-const uploadUrlToBunnyCDN = async (cloudflareUrl, identifier) => {
-    try {
-        return new Promise((resolve, reject) => {
-            const storageZone = process.env.BUNNY_STORAGE_ZONE_NAME;
-            const fileName = `${identifier}.txt`; 
-            const path = `/${storageZone}/urls/${fileName}`;
-
-            const options = {
-                method: "PUT",
-                host: "storage.bunnycdn.com",
-                path: path,
-                headers: {
-                    AccessKey: process.env.BUNNY_STORAGE_PASSWORD,
-                    "Content-Type": "text/plain",
-                    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-                    Expires: "0",
-                    Pragma: "no-cache",
-                },
-            };
-
-            const req = https.request(options, (res) => {
-                let responseData = "";
-
-                res.on("data", (chunk) => {
-                    responseData += chunk.toString("utf8");
-                });
-
-                res.on("end", () => {
-                    if (res.statusCode === 201) {
-                        bunnyLogger.info(`URL uploaded to BunnyCDN successfully: ${identifier}.txt`);
-                        resolve();
-                    } else {
-                        bunnyLogger.error(`Failed to upload URL to BunnyCDN: ${responseData}`);
-                        reject(new Error(`BunnyCDN upload failed with status: ${res.statusCode}`));
-                    }
-                });
-            });
-
-            req.on("error", (error) => {
-                bunnyLogger.error(`Upload error: ${error.message}`);
-                reject(error);
-            });
-
-            req.write(cloudflareUrl); 
-            req.end();
-        });
-    } catch (error) {
-        bunnyLogger.error(`Error uploading URL to BunnyCDN: ${error.message}`);
-        throw error;
-    }
-};
 
 // Start FFmpeg process
 const startFFmpeg = async (streamUrl, output, autoRecord = true) => {
