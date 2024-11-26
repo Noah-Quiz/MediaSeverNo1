@@ -173,12 +173,11 @@ const getMessage = async (queueName) => {
                     const messageContent = msg.content.toString();
                     let parsedMessage;
 
-                    // Parse the message
                     try {
                         parsedMessage = JSON.parse(messageContent);
                     } catch (parseError) {
                         rabbitMqLogger.error(`Error parsing message content: ${messageContent}`);
-                        channel.nack(msg, false, false); 
+                        channel.nack(msg, false, false);
                         return;
                     }
 
@@ -194,10 +193,10 @@ const getMessage = async (queueName) => {
                             // Check if the Cloudflare recording is ready
                             const recordUrl = await getCloudflareRecordUrl(id);
 
-                            // Upload directly to BunnyCDN
-                            await uploadToBunnyCDNDirectly(recordUrl, id);
+                            // Upload the URL to BunnyCDN
+                            await uploadUrlToBunnyCDN(recordUrl, id);
 
-                            cloudflareLogger.info(`Stream ${id} successfully uploaded to BunnyCDN`);
+                            cloudflareLogger.info(`Stream URL for ${id} successfully uploaded to BunnyCDN`);
                         } catch (error) {
                             if (error.message.includes("Unable to retrieve record URL")) {
                                 cloudflareLogger.warn(`Recording not ready for stream: ${id}. Requeuing...`);
@@ -235,24 +234,37 @@ const getCloudflareRecordUrl = async (streamId) => {
 
         const response = await axios.get(apiUrl, { headers });
 
-        if (response.data && response.data.result && response.data.result.downloaded_url) {
-            return response.data.result.downloaded_url;
+        if (response.data && response.data.result) {
+            const result = response.data.result;
+            const status = result.status?.state;
+
+            if (status === "ready") {
+                const hlsUrl = result.playback?.hls;
+                if (hlsUrl) {
+                    return hlsUrl; 
+                } else {
+                    throw new Error("HLS playback URL not available.");
+                }
+            } else {
+                throw new Error(`Video is not ready. Current state: ${status}`);
+            }
         } else {
-            throw new Error("Unable to retrieve record URL from Cloudflare");
+            throw new Error("Unable to retrieve video details from Cloudflare.");
         }
     } catch (error) {
-        cloudflareLogger.error(`Error fetching record URL: ${error.message}`);
+        cloudflareLogger.error(`Error fetching HLS URL: ${error.message}`);
         throw error;
     }
 };
 
-// Upload directly to BunnyCDN
-const uploadToBunnyCDNDirectly = async (cloudflareUrl, identifier) => {
+
+// Upload only the URL to BunnyCDN
+const uploadUrlToBunnyCDN = async (cloudflareUrl, identifier) => {
     try {
-        return new Promise(async (resolve, reject) => {
+        return new Promise((resolve, reject) => {
             const storageZone = process.env.BUNNY_STORAGE_ZONE_NAME;
-            const fileName = `${identifier}.mp4`; 
-            const path = `/${storageZone}/video/${identifier}/${fileName}`;
+            const fileName = `${identifier}.txt`; 
+            const path = `/${storageZone}/urls/${fileName}`;
 
             const options = {
                 method: "PUT",
@@ -260,22 +272,15 @@ const uploadToBunnyCDNDirectly = async (cloudflareUrl, identifier) => {
                 path: path,
                 headers: {
                     AccessKey: process.env.BUNNY_STORAGE_PASSWORD,
-                    "Content-Type": "application/octet-stream",
+                    "Content-Type": "text/plain",
                     "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
                     Expires: "0",
                     Pragma: "no-cache",
                 },
             };
 
-            // Stream from Cloudflare to BunnyCDN
-            const response = await axios({
-                method: "get",
-                url: cloudflareUrl,
-                responseType: "stream",
-            });
-
             const req = https.request(options, (res) => {
-                let responseData = '';
+                let responseData = "";
 
                 res.on("data", (chunk) => {
                     responseData += chunk.toString("utf8");
@@ -283,10 +288,10 @@ const uploadToBunnyCDNDirectly = async (cloudflareUrl, identifier) => {
 
                 res.on("end", () => {
                     if (res.statusCode === 201) {
-                        bunnyLogger.info(`Upload to BunnyCDN completed successfully: ${identifier}/${fileName}`);
+                        bunnyLogger.info(`URL uploaded to BunnyCDN successfully: ${identifier}.txt`);
                         resolve();
                     } else {
-                        bunnyLogger.error(`Failed to upload to BunnyCDN: ${responseData}`);
+                        bunnyLogger.error(`Failed to upload URL to BunnyCDN: ${responseData}`);
                         reject(new Error(`BunnyCDN upload failed with status: ${res.statusCode}`));
                     }
                 });
@@ -297,15 +302,11 @@ const uploadToBunnyCDNDirectly = async (cloudflareUrl, identifier) => {
                 reject(error);
             });
 
-            req.setTimeout(15000, () => {
-                req.destroy();
-                reject(new Error("Upload timed out"));
-            });
-
-            response.data.pipe(req); 
+            req.write(cloudflareUrl); 
+            req.end();
         });
     } catch (error) {
-        bunnyLogger.error(`Error uploading to BunnyCDN: ${error.message}`);
+        bunnyLogger.error(`Error uploading URL to BunnyCDN: ${error.message}`);
         throw error;
     }
 };
