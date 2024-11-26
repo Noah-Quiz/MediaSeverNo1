@@ -72,6 +72,91 @@ const sendToQueue = async (queueName, message) => {
 };
 
 
+// const getMessage = async (queueName) => {
+//     rabbitMqLogger.info(`Consuming queue: ${queueName}`);
+//     let connection;
+//     let channel;
+//     try {
+//         connection = await amqp.connect(rabbitMQUrl);
+//         channel = await connection.createChannel();
+
+//         await channel.assertQueue(queueName, { durable: true });
+
+//         channel.consume(queueName, async (msg) => {
+//             if (msg !== null) {
+//                 try {
+//                     const messageContent = msg.content.toString();
+//                     let parsedMessage;
+
+//                     try {
+//                         parsedMessage = JSON.parse(messageContent);
+//                     } catch (parseError) {
+//                         rabbitMqLogger.error(`Error parsing message content: ${messageContent}`);
+//                         channel.nack(msg, true, false); // Reject and requeue the message for later retry
+//                         return; // Exit to avoid further processing
+//                     }
+
+//                     cloudflareLogger.info(`Cloudflare Event: ${parsedMessage.data?.event_type}`);
+
+//                     const id = parsedMessage.data?.input_id;
+//                     switch (queueName) {
+//                         case "cloudflare.livestream":
+//                             const event = parsedMessage.data?.event_type;
+
+//                             // Retrieve stream key using input id
+//                             const stream = await retrieveCloudFlareStreamLiveInput(id);
+//                             const rtmpsUrl = stream?.rtmpsPlayback?.url;
+//                             const streamKey = stream?.rtmpsPlayback?.streamKey;
+
+//                             const streamServer = `${rtmpsUrl}${streamKey}`;
+//                             switch (event) {
+//                                 case "live_input.connected":
+//                                     await startFFmpeg(streamServer, id, false);
+//                                     break;
+
+//                                 case "live_input.disconnected":
+//                                     await stopFFmpeg(id, false);
+//                                     const timestamp = retrieveTimestamp(id);
+
+//                                     const bunnyOutputDir = path.join(bunnyDir, `${id}-${timestamp}`);
+//                                     if (!fs.existsSync(bunnyOutputDir)) {
+//                                         fs.mkdirSync(bunnyOutputDir, { recursive: true });
+//                                     }
+
+//                                     const m3u8FileName = `${id}.m3u8`;
+//                                     await handleStreamFinish(bunnyOutputDir, m3u8FileName, id);
+
+//                                     await sendToQueue("live_stream.disconnected", {
+//                                         live_input_id: id,
+//                                         streamOnlineUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${id}-${timestamp}/${m3u8FileName}`
+//                                     });
+
+//                                     setTimeout(async () => {
+//                                         await handleDeleteStreamRelatedFolders(id);
+//                                     }, 900000);
+//                                     break;
+
+//                                 case "live_input.errored":
+//                                     cloudflareLogger.error("Cloudflare returned event live_input.errored");
+//                                     break;
+//                             }
+//                             break;
+//                     }
+
+//                     channel.ack(msg); 
+//                 } catch (error) {
+//                     rabbitMqLogger.error(`Error while processing message: ${error.message}`);
+//                     rabbitMqLogger.error(`Stack trace: ${error.stack}`);
+//                     channel.nack(msg, true, false); // Reject and requeue the message for later retry
+//                 }
+//             }
+//         });
+//     } catch (error) {
+//         rabbitMqLogger.error(`Error consuming from RabbitMQ: ${error.message}`);
+//         rabbitMqLogger.error(`Stack trace: ${error.stack}`);
+//     }
+// };
+
 const getMessage = async (queueName) => {
     rabbitMqLogger.info(`Consuming queue: ${queueName}`);
     let connection;
@@ -79,83 +164,83 @@ const getMessage = async (queueName) => {
     try {
         connection = await amqp.connect(rabbitMQUrl);
         channel = await connection.createChannel();
-
         await channel.assertQueue(queueName, { durable: true });
-
-        channel.consume(queueName, async (msg) => {
-            if (msg !== null) {
-                try {
-                    const messageContent = msg.content.toString();
-                    let parsedMessage;
-
-                    try {
-                        parsedMessage = JSON.parse(messageContent);
-                    } catch (parseError) {
-                        rabbitMqLogger.error(`Error parsing message content: ${messageContent}`);
-                        channel.nack(msg, true, false); // Reject and requeue the message for later retry
-                        return; // Exit to avoid further processing
-                    }
-
-                    cloudflareLogger.info(`Cloudflare Event: ${parsedMessage.data?.event_type}`);
-
-                    const id = parsedMessage.data?.input_id;
-                    switch (queueName) {
-                        case "cloudflare.livestream":
-                            const event = parsedMessage.data?.event_type;
-
-                            // Retrieve stream key using input id
-                            const stream = await retrieveCloudFlareStreamLiveInput(id);
-                            const rtmpsUrl = stream?.rtmpsPlayback?.url;
-                            const streamKey = stream?.rtmpsPlayback?.streamKey;
-
-                            const streamServer = `${rtmpsUrl}${streamKey}`;
-                            switch (event) {
-                                case "live_input.connected":
-                                    await startFFmpeg(streamServer, id, false);
-                                    break;
-
-                                case "live_input.disconnected":
-                                    await stopFFmpeg(id, false);
-                                    const timestamp = retrieveTimestamp(id);
-
-                                    const bunnyOutputDir = path.join(bunnyDir, `${id}-${timestamp}`);
-                                    if (!fs.existsSync(bunnyOutputDir)) {
-                                        fs.mkdirSync(bunnyOutputDir, { recursive: true });
-                                    }
-
-                                    const m3u8FileName = `${id}.m3u8`;
-                                    await handleStreamFinish(bunnyOutputDir, m3u8FileName, id);
-
-                                    await sendToQueue("live_stream.disconnected", {
-                                        live_input_id: id,
-                                        streamOnlineUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${id}-${timestamp}/${m3u8FileName}`
-                                    });
-
-                                    setTimeout(async () => {
-                                        await handleDeleteStreamRelatedFolders(id);
-                                    }, 900000);
-                                    break;
-
-                                case "live_input.errored":
-                                    cloudflareLogger.error("Cloudflare returned event live_input.errored");
-                                    break;
-                            }
-                            break;
-                    }
-
-                    channel.ack(msg); 
-                } catch (error) {
-                    rabbitMqLogger.error(`Error while processing message: ${error.message}`);
-                    rabbitMqLogger.error(`Stack trace: ${error.stack}`);
-                    channel.nack(msg, true, false); // Reject and requeue the message for later retry
-                }
-            }
-        });
+  
+      channel.consume(queueName, async (msg) => {
+        if (msg !== null) {
+          const data = JSON.parse(msg.content.toString());
+          const identifier = data.streamId; 
+  
+          try {
+            const cloudflareRecordUrl = await getCloudflareRecordUrl(identifier);
+            const localFilePath = await downloadRecord(cloudflareRecordUrl, identifier);
+  
+            const fileName = `${identifier}.mp4`;
+            await uploadToBunnyCDN(localFilePath, identifier, fileName);
+  
+            cloudflareLogger.info(`Successfully processed stream ${identifier}`);
+          } catch (error) {
+            cloudflareLogger.error(`Failed to process stream ${identifier}: ${error.message}`);
+          }
+  
+          channel.ack(msg); 
+        }
+      });
     } catch (error) {
-        rabbitMqLogger.error(`Error consuming from RabbitMQ: ${error.message}`);
-        rabbitMqLogger.error(`Stack trace: ${error.stack}`);
+      rabbitMqLogger.error("Error consuming queue: ", error.message);
+      throw error;
     }
-};
+  };
+
+
+// Get record url
+  const getCloudflareRecordUrl = async (streamId) => {
+    try {
+      const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/stream/${streamId}`;
+      const headers = {
+        Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,
+      };
+  
+      const response = await axios.get(apiUrl, { headers });
+  
+      if (response.data && response.data.result && response.data.result.downloaded_url) {
+        return response.data.result.downloaded_url;
+      } else {
+        throw new Error("Unable to retrieve record URL from Cloudflare");
+      }
+    } catch (error) {
+      cloudflareLogger.error(`Error fetching record URL: ${error.message}`);
+      throw error;
+    }
+  };
+  
+  // download record from Cloudflare
+  const downloadRecord = (url, identifier) => {
+    return new Promise((resolve, reject) => {
+      const outputDir = path.join(__dirname, "records");
+      if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+      }
+  
+      const filePath = path.join(outputDir, `${identifier}.mp4`);
+      const file = fs.createWriteStream(filePath);
+  
+      https.get(url, (response) => {
+        if (response.statusCode === 200) {
+          response.pipe(file);
+          file.on("finish", () => {
+            file.close(() => {
+              resolve(filePath);
+            });
+          });
+        } else {
+          reject(new Error(`Failed to download record. Status code: ${response.statusCode}`));
+        }
+      }).on("error", (error) => {
+        reject(error);
+      });
+    });
+  };
 
 // Start FFmpeg process
 const startFFmpeg = async (streamUrl, output, autoRecord = true) => {
