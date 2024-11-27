@@ -1,9 +1,9 @@
-const { getLatestLogContent } = require("../services/LogService");
+const { getBunnyCdnLogs } = require("../services/LogService");
 
-const getLogs = (req, res) => {
+const getLogs = async (req, res) => {
   try {
-    const logContent = getLatestLogContent();
-    res.status(200).json({ message: "Success", data: logContent });
+    const logs = await getBunnyCdnLogs();
+    res.status(200).json({ message: "Success", data: logs });
   } catch (error) {
     res.status(500).json({ message: "Failed to retrieve logs", error: error.message });
   }
