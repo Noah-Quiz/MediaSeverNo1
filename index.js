@@ -12,6 +12,7 @@ const app = express();
 const rabbitMqLogger = getLogger("RABBITMQ");
 const cloudflareLogger = getLogger("CLOUDFLARE");
 const serverLogger = getLogger("SERVER");
+const logRoutes = require("./routes/LogRoute");
 
 // Middleware
 app.use(
@@ -53,7 +54,7 @@ app.post("/api/webhooks/cloudflare", async (req, res) => {
     res.status(500).json({ error: "Failed to process webhook from Cloudflare" });
   }
 })
-
+app.use("/api/logs", logRoutes)
 app.use("/api/cloudflare", cloudflareRoutes);
 app.use("/api/streams", streamRoutes);
 app.use("/api/ffmpeg/", ffmpegRoutes);

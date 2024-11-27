@@ -26,6 +26,7 @@
     "node-media-server": "^2.7.0",
     "nodemon": "^3.1.7",
     "os": "^0.1.2",
+    "test-cloudflare": "file:",
     "winston": "^3.17.0"
   }
 }
