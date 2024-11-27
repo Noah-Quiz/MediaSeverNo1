@@ -7,6 +7,7 @@ const { spawn, exec } = require('child_process');
 const moment = require("moment");
 const { default: axios } = require("axios");
 const getLogger = require("./logger");
+const { Console } = require("console");
 const bunnyLogger = getLogger("BUNNYCDN");
 const ffmpegLogger = getLogger("FFMPEG");
 const rabbitMqLogger = getLogger("RABBITMQ");
@@ -72,91 +73,6 @@ const sendToQueue = async (queueName, message) => {
 };
 
 
-// const getMessage = async (queueName) => {
-//     rabbitMqLogger.info(`Consuming queue: ${queueName}`);
-//     let connection;
-//     let channel;
-//     try {
-//         connection = await amqp.connect(rabbitMQUrl);
-//         channel = await connection.createChannel();
-
-//         await channel.assertQueue(queueName, { durable: true });
-
-//         channel.consume(queueName, async (msg) => {
-//             if (msg !== null) {
-//                 try {
-//                     const messageContent = msg.content.toString();
-//                     let parsedMessage;
-
-//                     try {
-//                         parsedMessage = JSON.parse(messageContent);
-//                     } catch (parseError) {
-//                         rabbitMqLogger.error(`Error parsing message content: ${messageContent}`);
-//                         channel.nack(msg, true, false); // Reject and requeue the message for later retry
-//                         return; // Exit to avoid further processing
-//                     }
-
-//                     cloudflareLogger.info(`Cloudflare Event: ${parsedMessage.data?.event_type}`);
-
-//                     const id = parsedMessage.data?.input_id;
-//                     switch (queueName) {
-//                         case "cloudflare.livestream":
-//                             const event = parsedMessage.data?.event_type;
-
-//                             // Retrieve stream key using input id
-//                             const stream = await retrieveCloudFlareStreamLiveInput(id);
-//                             const rtmpsUrl = stream?.rtmpsPlayback?.url;
-//                             const streamKey = stream?.rtmpsPlayback?.streamKey;
-
-//                             const streamServer = `${rtmpsUrl}${streamKey}`;
-//                             switch (event) {
-//                                 case "live_input.connected":
-//                                     await startFFmpeg(streamServer, id, false);
-//                                     break;
-
-//                                 case "live_input.disconnected":
-//                                     await stopFFmpeg(id, false);
-//                                     const timestamp = retrieveTimestamp(id);
-
-//                                     const bunnyOutputDir = path.join(bunnyDir, `${id}-${timestamp}`);
-//                                     if (!fs.existsSync(bunnyOutputDir)) {
-//                                         fs.mkdirSync(bunnyOutputDir, { recursive: true });
-//                                     }
-
-//                                     const m3u8FileName = `${id}.m3u8`;
-//                                     await handleStreamFinish(bunnyOutputDir, m3u8FileName, id);
-
-//                                     await sendToQueue("live_stream.disconnected", {
-//                                         live_input_id: id,
-//                                         streamOnlineUrl: `https://${process.env.BUNNY_DOMAIN_STORAGE_ZONE}/video/${id}-${timestamp}/${m3u8FileName}`
-//                                     });
-
-//                                     setTimeout(async () => {
-//                                         await handleDeleteStreamRelatedFolders(id);
-//                                     }, 900000);
-//                                     break;
-
-//                                 case "live_input.errored":
-//                                     cloudflareLogger.error("Cloudflare returned event live_input.errored");
-//                                     break;
-//                             }
-//                             break;
-//                     }
-
-//                     channel.ack(msg); 
-//                 } catch (error) {
-//                     rabbitMqLogger.error(`Error while processing message: ${error.message}`);
-//                     rabbitMqLogger.error(`Stack trace: ${error.stack}`);
-//                     channel.nack(msg, true, false); // Reject and requeue the message for later retry
-//                 }
-//             }
-//         });
-//     } catch (error) {
-//         rabbitMqLogger.error(`Error consuming from RabbitMQ: ${error.message}`);
-//         rabbitMqLogger.error(`Stack trace: ${error.stack}`);
-//     }
-// };
-
 const getMessage = async (queueName) => {
     rabbitMqLogger.info(`Consuming queue: ${queueName}`);
     let connection;
@@ -192,7 +108,7 @@ const getMessage = async (queueName) => {
 
                         try {
                             // Check if the Cloudflare recording is ready
-                            const recordUrl = await getCloudflareRecordUrl(id);
+                            const recordUrl = await enableStreamUrlForRecording(id);
 
                             // Download to local storage
                             const localFilePath = `./videos/${id}.mp4`; 
@@ -231,6 +147,7 @@ const getMessage = async (queueName) => {
 };
 
 
+
 // Download file to local storage
 const downloadToLocal = async (url, filePath) => {
     try {
@@ -253,7 +170,7 @@ const downloadToLocal = async (url, filePath) => {
             response.data.pipe(writer);
 
             writer.on("finish", () => {
-                bunnyLogger.info(`File downloaded successfully: ${filePath}`);
+                bunnyLogger.info(`File downloaded successfully: ${filePath}`); // Use bunnyLogger here
                 resolve();
             });
 
@@ -267,77 +184,6 @@ const downloadToLocal = async (url, filePath) => {
         throw error;
     }
 };
-// Get Cloudflare record URL
-const getCloudflareRecordUrl = async (streamId) => {
-    try {
-        const apiBase = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/stream/${streamId}`;
-        const headers = {
-            Authorization: `Bearer ${process.env.CLOUDFLARE_API_KEY}`,
-        };
-
-        let streamReady = false;
-        const maxRetries = 5;
-        const delayMs = 5000;
-
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            const statusResponse = await axios.get(apiBase, { headers });
-
-            if (statusResponse.data && statusResponse.data.result.status === "ready") {
-                streamReady = true;
-                break;
-            }
-
-            cloudflareLogger.info(
-                `Stream status is not ready yet (attempt ${attempt}/${maxRetries}). Retrying in ${delayMs}ms...`
-            );
-            await new Promise(resolve => setTimeout(resolve, delayMs));
-        }
-
-        if (!streamReady) {
-            throw new Error("Stream is not ready after maximum retries.");
-        }
-
-
-
-        const downloadTriggerResponse = await axios.post(`${apiBase}/downloads`, {}, { headers });
-
-        if (!downloadTriggerResponse.data.success) {
-            throw new Error("Failed to trigger the creation of the download URL.");
-        }
-
-
-
-        let downloadUrl = null;
-
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            const downloadUrlResponse = await axios.get(apiBase, { headers });
-
-            if (
-                downloadUrlResponse.data &&
-                downloadUrlResponse.data.result &&
-                downloadUrlResponse.data.result.downloaded_url
-            ) {
-                downloadUrl = downloadUrlResponse.data.result.downloaded_url;
-                break;
-            }
-
-            cloudflareLogger.info(
-                `Download URL not available yet (attempt ${attempt}/${maxRetries}). Retrying in ${delayMs}ms...`
-            );
-            await new Promise(resolve => setTimeout(resolve, delayMs));
-        }
-
-        if (!downloadUrl) {
-            throw new Error("Download URL not available after maximum retries.");
-        }
-
-        return downloadUrl;
-    } catch (error) {
-        cloudflareLogger.error(`Error fetching record URL: ${error.message}`);
-        throw error;
-    }
-};
-
 
 
 // Start FFmpeg process
@@ -505,33 +351,34 @@ const createM3U8WithFFmpeg = async (liveStreamOutputDir, bunnyOutputDir, m3u8Fil
 
 
 // Main function to handle the stream finishing
-const handleStreamFinish = async (bunnyOutputDir, m3u8FileName, identifier) => {
-    try {
-        // Retrieve timestamp
-        const timestamp = retrieveTimestamp(identifier);
-        const liveStreamOutputDir = path.join(liveStreamDir, `${identifier}-${timestamp}`);
+// const handleStreamFinish = async (bunnyOutputDir, m3u8FileName, identifier) => {
+//     try {
+//         // Retrieve timestamp
+//         const timestamp = retrieveTimestamp(identifier);
+//         const liveStreamOutputDir = path.join(liveStreamDir, `${identifier}-${timestamp}`);
 
-        // Step 1: Create the M3U8 file with FFmpeg
-        ffmpegLogger.info(`Creating M3U8 file for identifier: ${identifier}`);
-        await createM3U8WithFFmpeg(liveStreamOutputDir, bunnyOutputDir, identifier, 300);
+//         // Step 1: Create the M3U8 file with FFmpeg
+//         ffmpegLogger.info(`Creating M3U8 file for identifier: ${identifier}`);
+//         await createM3U8WithFFmpeg(liveStreamOutputDir, bunnyOutputDir, identifier, 300);
 
-        // Step 2: Replace TS file paths in the M3U8
-        ffmpegLogger.info(`Replacing TS file paths for M3U8 file: ${m3u8FileName}`);
-        await replaceTsFilePath(path.join(bunnyOutputDir, m3u8FileName), identifier);
+//         // Step 2: Replace TS file paths in the M3U8
+//         ffmpegLogger.info(`Replacing TS file paths for M3U8 file: ${m3u8FileName}`);
+//         await replaceTsFilePath(path.join(bunnyOutputDir, m3u8FileName), identifier);
 
-        // Step 3: Upload the TS files
-        ffmpegLogger.info(`Uploading TS files for identifier: ${identifier}`);
-        await uploadTsFiles(liveStreamOutputDir, identifier, 300);
+//         // Step 3: Upload the TS files
+//         ffmpegLogger.info(`Uploading TS files for identifier: ${identifier}`);
+//         await uploadTsFiles(liveStreamOutputDir, identifier, 300);
 
-        // Step 4: Upload the M3U8 file to Bunny CDN
-        ffmpegLogger.info(`Uploading M3U8 file to Bunny CDN for identifier: ${identifier}`);
-        await uploadToBunnyCDN(path.join(bunnyOutputDir, m3u8FileName), `${identifier}-${timestamp}`, m3u8FileName);
+//         // Step 4: Upload the M3U8 file to Bunny CDN
+//         ffmpegLogger.info(`Uploading M3U8 file to Bunny CDN for identifier: ${identifier}`);
+//         await uploadToBunnyCDN(path.join(bunnyOutputDir, m3u8FileName), `${identifier}-${timestamp}`, m3u8FileName);
 
-        ffmpegLogger.info(`Stream processing finished for identifier: ${identifier}`);
-    } catch (error) {
-        streamLogger.error(`Error finishing stream for identifier ${identifier}: ${error.message}`);
-    }
-};
+//         ffmpegLogger.info(`Stream processing finished for identifier: ${identifier}`);
+//     } catch (error) {
+//         streamLogger.error(`Error finishing stream for identifier ${identifier}: ${error.message}`);
+//     }
+// };
+
 
 const handleDeleteStreamRelatedFolders = async (identifier) => {
     try {
@@ -1028,29 +875,106 @@ function killFfmpegProcessesLinux() {
     }
 }
 
-const retrieveCloudFlareStreamLiveInput = async (uid) => {
+
+
+const getCreator = async (streamId) => {
     try {
-        let stream = null;
-        var options = {
-            method: "GET",
-            url: `${process.env.CLOUDFLARE_STREAM_API_URL}/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/stream/live_inputs/${uid}`,
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${process.env.CLOUDFLARE_API_KEY}`,
-            },
+        const apiBase = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/stream/live_inputs/${streamId}`;
+        const headers = {
+            Authorization: `Bearer ${process.env.CLOUDFLARE_API_KEY}`,
+        };
+        const response = await axios.get(apiBase, { headers });
+
+        // Extract the defaultCreator field from the response
+        const defaultCreator = response.data.result?.meta.defaultCreator;
+
+        if (!defaultCreator) {
+            throw new Error('defaultCreator not found');
+        }
+       console.log(defaultCreator);
+        return defaultCreator;
+    } catch (error) {
+        console.error('Error fetching defaultCreator:', error.message);
+        throw error; // Let the calling function handle the error
+    }
+};
+
+
+const checkStreamStatus = async (streamId) => {
+    try {
+        const defaultCreator = await getCreator(streamId);
+        const apiBase = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/stream/?creator=${defaultCreator}`;
+        const headers = {
+            Authorization: `Bearer ${process.env.CLOUDFLARE_API_KEY}`,
         };
 
-        await axios.request(options)
-            .then(async function (response) {
-                stream = response.data.result;
-            })
-            .catch(function (error) {
-                cloudflareLogger.error("Error retrieving live input");
-            });
-        return stream;
+        const maxRetries = 10;
+        const delay = 5000;
+
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            const response = await axios.get(apiBase, { headers });
+
+            if (response.data.result) {
+                const latestStream = response.data.result
+                    .sort((a, b) => new Date(b.created) - new Date(a.created))[0];
+
+                const { status, uid } = latestStream;
+
+                if (status.state === 'ready') {
+                    console.log(`Latest stream ${streamId} is ready. UID: ${uid}`);
+                    return { isReady: true, uid };
+                } else if (status.state === 'error') {
+                    console.log(`Latest stream ${streamId} has an error. Error: ${status.errorReasonText}. UID: ${uid}`);
+                } else {
+                    console.log(`Latest stream ${streamId} is not ready. Status: ${status.state}. Retrying... (${attempt + 1}/${maxRetries})`);
+                }
+            } else {
+                console.log(`No result found for stream ${streamId}. Retrying... (${attempt + 1}/${maxRetries})`);
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, delay)); 
+        }
+
+        console.log(`Stream ${streamId} did not become ready within the allowed retries.`);
+        return { isReady: false, uid: null };
     } catch (error) {
+        console.error(`Error checking stream status: ${error.message}`);
         throw error;
     }
 };
 
-module.exports = { sendToQueue, getMessage, startFFmpeg, killFfmpegProcessesLinux, killFfmpegProcessesWindow };
+  
+
+const enableStreamUrlForRecording = async (streamId) => {
+    try {
+        const { isReady, uid } = await checkStreamStatus(streamId);
+        if (!isReady) {
+            throw new Error(`Stream ${streamId} is not ready for download.`);
+        }
+
+        // Proceed to enable the download URL
+        const apiBase = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/stream/${uid}`;
+        const headers = {
+            Authorization: `Bearer ${process.env.CLOUDFLARE_API_KEY}`,
+        };
+
+        const downloadTriggerResponse = await axios.post(`${apiBase}/downloads`, {}, { headers });
+
+        if (!downloadTriggerResponse.data.success) {
+            throw new Error("Failed to trigger the creation of the download URL");
+        }
+
+        const downloadURL = downloadTriggerResponse.data.result.default.url;
+        console.log(`Download URL enabled: ${downloadURL}, UID: ${uid}`);
+        return  downloadURL; 
+    } catch (error) {
+        cloudflareLogger.error(`Error enabling stream URL for streamId ${streamId}: ${error.message}`);
+        throw error;
+    }
+};
+
+
+  
+
+ 
+module.exports = { sendToQueue, getMessage, startFFmpeg, killFfmpegProcessesLinux, killFfmpegProcessesWindow, enableStreamUrlForRecording };
