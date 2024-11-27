@@ -1,40 +1,27 @@
-const fs = require("fs");
-const path = require("path");
-
-const LOG_DIR = path.join(__dirname, "../logs");
+const axios = require("axios");
 
 /**
- * Get the latest log file in the logs directory.
+ * Fetch logs from BunnyCDN.
  */
-const getLatestLogFile = () => {
-  const files = fs.readdirSync(LOG_DIR);
-  const logFiles = files.filter((file) => file.endsWith(".log"));
-
-  if (logFiles.length === 0) {
-    throw new Error("No log files found");
-  }
-
-  // Sort files by modification time in descending order
-  logFiles.sort((a, b) => {
-    const timeA = fs.statSync(path.join(LOG_DIR, a)).mtime;
-    const timeB = fs.statSync(path.join(LOG_DIR, b)).mtime;
-    return timeB - timeA;
-  });
-
-  return path.join(LOG_DIR, logFiles[0]);
-};
-
-/**
- * Read and return the content of the latest log file.
- */
-const getLatestLogContent = () => {
+const getBunnyCdnLogs = async () => {
   try {
-    const latestLogFile = getLatestLogFile();
-    const content = fs.readFileSync(latestLogFile, "utf-8");
-    return content;
+    const apiUrl = `https://${process.env.BUNNY_STORAGE_HOST_NAME}/logs`;
+    const apiKey = process.env.BUNNY_ACCOUNT_API_KEY;
+
+    const response = await axios.get(apiUrl, {
+      headers: {
+        AccessKey: apiKey,
+      },
+    });
+
+    if (response.status !== 200) {
+      throw new Error(`Failed to fetch BunnyCDN logs: ${response.statusText}`);
+    }
+
+    return response.data; 
   } catch (error) {
-    throw new Error(`Error reading log file: ${error.message}`);
+    throw new Error(`Error fetching BunnyCDN logs: ${error.message}`);
   }
 };
 
-module.exports = { getLatestLogContent };
+module.exports = { getBunnyCdnLogs };
